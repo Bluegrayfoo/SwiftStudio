@@ -144,16 +144,15 @@ static NSDictionary *CompileOnly(NSString *source) {
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-compile-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
   NSString *sourcePath = [dir stringByAppendingPathComponent:@"Preview.swift"];
-  NSString *exe = [dir stringByAppendingPathComponent:@"PreviewApp"];
   NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
-  NSString *hosted = [StripPreviewBlocks(source) stringByAppendingString:@"\n\n@main\nstruct PreviewHostApp: App {\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n"];
+  NSString *hosted = [StripPreviewBlocks(source) stringByAppendingString:@"\n\n@MainActor\nprivate func __swiftStudioPreviewTypecheck() -> some View {\n    ContentView()\n}\n"];
   [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   SetPercent(@"Compile", 22);
   NSTask *compile = [NSTask new];
   compile.launchPath = @"/usr/bin/swiftc";
-  compile.arguments = @[@"-parse-as-library", @"-module-cache-path", cache, sourcePath, @"-o", exe];
+  compile.arguments = @[@"-typecheck", @"-parse-as-library", @"-module-cache-path", cache, sourcePath];
   NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
   env[@"CLANG_MODULE_CACHE_PATH"] = cache;
   compile.environment = env;
