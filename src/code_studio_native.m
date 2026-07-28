@@ -99,6 +99,7 @@ static void UpdateHistory(NSString *appName) {
 @property NSMutableString *consoleLog;
 @property NSImage *swiftLogo;
 @property BOOL showingProject;
+@property BOOL openingPreview;
 @end
 
 @implementation StudioDelegate
@@ -256,9 +257,25 @@ static void UpdateHistory(NSString *appName) {
   if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
   NSString *status = doc[@"status"] ?: @""; if ([status isEqualToString:@"complete"] || [status isEqualToString:@"error"]) {
     if ([status isEqualToString:@"complete"]) {
-      NSString *errorText = nil;
-      if ([self openPreviewWindowWithSource:[self combinedSource] errorText:&errorText]) [self appendConsole:@"Opened preview window"];
-      else [self appendConsole:errorText ?: @"Could not open preview window"];
+      if (self.openingPreview) return;
+      self.openingPreview = YES;
+      SetPercent(@"Compile", 100);
+      [self refreshConsole:nil];
+      [self appendConsole:@"Opening preview window..."];
+      NSString *source = [[self combinedSource] copy];
+      dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *errorText = nil;
+        BOOL opened = [self openPreviewWindowWithSource:source errorText:&errorText];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (opened) [self appendConsole:@"Opened preview window"];
+          else [self appendConsole:errorText ?: @"Could not open preview window"];
+          if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]];
+          self.pendingRequestID = nil;
+          self.openingPreview = NO;
+          [self refreshConsole:nil];
+        });
+      });
+      return;
     } else {
       if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
     }
