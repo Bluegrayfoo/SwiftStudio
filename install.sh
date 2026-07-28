@@ -30,5 +30,10 @@ chmod +x "$INSTALL_DIR/code_studio"
 echo "Installed SwiftStudio command:"
 echo "  $INSTALL_DIR/code_studio"
 echo
-echo "Run:"
-echo "  $INSTALL_DIR/code_studio --thread Thread1"
+if [[ "${SWIFTSTUDIO_NO_LAUNCH:-0}" == "1" ]]; then
+  echo "Run:"
+  echo "  $INSTALL_DIR/code_studio --thread Thread1"
+else
+  echo "Opening SwiftStudio..."
+  "$INSTALL_DIR/code_studio" --thread Thread1 >/dev/null 2>&1 &
+fi

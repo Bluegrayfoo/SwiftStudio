@@ -96,7 +96,7 @@ static void SetPercent(NSString *kind, double value) { PatchDocument([NSString s
   }
   return out;
 }
-- (NSDictionary *)compileAndLaunch:(NSString *)source appName:(NSString *)appName {
+- (NSDictionary *)compileAndValidate:(NSString *)source appName:(NSString *)appName {
   SetPercent(@"Compile", 3);
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftui-preview-%@", NSUUID.UUID.UUIDString]]; [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
   NSString *sourcePath = [dir stringByAppendingPathComponent:@"Preview.swift"]; NSString *exe = [dir stringByAppendingPathComponent:@"PreviewApp"]; NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"]; [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
@@ -120,10 +120,8 @@ static void SetPercent(NSString *kind, double value) { PatchDocument([NSString s
   NSString *compilerOut = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
   NSString *compilerErr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
   if (compile.terminationStatus != 0) { SetPercent(@"Compile", 100); return @{@"ok": @NO, @"preview": compilerOut.length ? compilerOut : @"SwiftUI compile failed.", @"error": compilerErr}; }
-  SetPercent(@"Compile", 96);
-  NSTask *run = [NSTask new]; run.launchPath = exe; run.standardOutput = [NSPipe pipe]; run.standardError = [NSPipe pipe]; [run launch];
   SetPercent(@"Compile", 100);
-  return @{@"ok": @YES, @"preview": @"Opened window", @"error": @""};
+  return @{@"ok": @YES, @"preview": @"Ready for preview", @"error": @""};
 }
 - (void)poll:(NSTimer *)timer {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -131,7 +129,7 @@ static void SetPercent(NSString *kind, double value) { PatchDocument([NSString s
       NSError *error = nil; NSDictionary *remote = GetDocument([NSString stringWithFormat:@"Threads/%@", thread], &error); if (error) { [self log:[NSString stringWithFormat:@"%@: %@", thread, error.localizedDescription]]; continue; }
       NSString *requestID = remote[@"requestId"]; NSString *source = remote[@"send"]; if (!requestID.length || !source.length || [self.seen[thread] isEqualToString:requestID]) continue; self.seen[thread] = requestID;
       NSString *appName = remote[@"appName"] ?: @"SwiftUI App"; [self log:[NSString stringWithFormat:@"%@: compiling raw SwiftUI source for %@", thread, appName]]; PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": @"running", @"startedAt": NSDate.date}, nil);
-      NSDictionary *result = [self compileAndLaunch:source appName:appName]; BOOL ok = [result[@"ok"] boolValue];
+      NSDictionary *result = [self compileAndValidate:source appName:appName]; BOOL ok = [result[@"ok"] boolValue];
       PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": ok ? @"complete" : @"error", @"preview": result[@"preview"] ?: @"", @"error": result[@"error"] ?: @"", @"completedAt": NSDate.date}, nil); if (ok) UpdateHistory(appName); [self log:[NSString stringWithFormat:@"%@: %@", thread, ok ? @"complete" : @"error"]];
     }
   });
@@ -140,7 +138,7 @@ static void SetPercent(NSString *kind, double value) { PatchDocument([NSString s
 
 int main(int argc, const char *argv[]) {
   if (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h"))) {
-    puts("Preview Runner\n\nUsage:\n  ~/cmds/preview_runner [--thread Thread1]\n  ~/cmds/preview_runner --all\n\nNative NSApplication runner. Compiles raw SwiftUI source with swiftc, launches the preview executable, and writes status back to Firestore.");
+    puts("Preview Runner\n\nUsage:\n  ~/cmds/preview_runner [--thread Thread1]\n  ~/cmds/preview_runner --all\n\nNative NSApplication runner. Silently compiles raw SwiftUI source with swiftc and writes status back to Firestore.");
     return 0;
   }
   @autoreleasepool {

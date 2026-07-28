@@ -197,6 +197,39 @@ static void UpdateHistory(NSString *appName) {
 - (NSString *)combinedSource {
   NSMutableString *source = [NSMutableString string]; for (NSString *fid in self.fileIDs) { [source appendFormat:@"\n// %@.swift\n%@\n", fid, [self project][@"files"][fid][@"code"] ?: @""]; } return source;
 }
+- (NSString *)stripPreviewBlocks:(NSString *)source {
+  NSMutableString *out = [NSMutableString string]; NSArray *lines = [source componentsSeparatedByString:@"\n"]; BOOL skipping = NO; NSInteger depth = 0;
+  for (NSString *line in lines) {
+    if (!skipping && [line rangeOfString:@"#Preview"].location != NSNotFound) { skipping = YES; depth = 0; }
+    if (skipping) {
+      for (NSUInteger i=0; i<line.length; i++) { unichar c=[line characterAtIndex:i]; if (c=='{') depth++; if (c=='}') depth--; }
+      if (depth <= 0 && [line rangeOfString:@"}"].location != NSNotFound) skipping = NO;
+      continue;
+    }
+    [out appendFormat:@"%@\n", line];
+  }
+  return out;
+}
+- (BOOL)openPreviewWindowWithSource:(NSString *)source errorText:(NSString **)errorText {
+  NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-preview-%@", NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+  NSString *sourcePath = [dir stringByAppendingPathComponent:@"Preview.swift"];
+  NSString *exe = [dir stringByAppendingPathComponent:@"PreviewApp"];
+  NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"];
+  [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
+  NSString *hosted = [[self stripPreviewBlocks:source] stringByAppendingString:@"\n\n@main\nstruct PreviewHostApp: App {\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n"];
+  [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  NSTask *compile = [NSTask new]; compile.launchPath = @"/usr/bin/swiftc"; compile.arguments = @[@"-parse-as-library", @"-module-cache-path", cache, sourcePath, @"-o", exe];
+  NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy]; env[@"CLANG_MODULE_CACHE_PATH"] = cache; compile.environment = env;
+  NSPipe *outPipe = [NSPipe pipe]; NSPipe *errPipe = [NSPipe pipe]; compile.standardOutput = outPipe; compile.standardError = errPipe; NSDate *start = NSDate.date; [compile launch];
+  while (compile.isRunning && [NSDate.date timeIntervalSinceDate:start] < 75) [NSThread sleepForTimeInterval:0.15];
+  if (compile.isRunning) { [compile terminate]; if (errorText) *errorText = @"Preview window compile timed out."; return NO; }
+  NSString *compilerOut = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
+  NSString *compilerErr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
+  if (compile.terminationStatus != 0) { if (errorText) *errorText = compilerErr.length ? compilerErr : (compilerOut.length ? compilerOut : @"Preview window compile failed."); return NO; }
+  NSTask *run = [NSTask new]; run.launchPath = exe; run.standardOutput = [NSPipe pipe]; run.standardError = [NSPipe pipe]; [run launch];
+  return YES;
+}
 - (NSString *)bar:(double)value { NSInteger fill = (NSInteger)round(MAX(0, MIN(100, value)) * 15.0 / 100.0); NSMutableString *s = [@"[" mutableCopy]; for (NSInteger i=0;i<fill;i++) [s appendString:@"="]; [s appendString:@">"]; for (NSInteger i=fill;i<15;i++) [s appendString:@" "]; [s appendString:@"]"]; return s; }
 - (void)appendConsole:(NSString *)line { if (!self.consoleLog) self.consoleLog = [NSMutableString string]; if (line.length) [self.consoleLog appendFormat:@"%@\n", line]; [self refreshConsole:nil]; }
 - (void)refreshConsole:(id)sender {
@@ -221,7 +254,15 @@ static void UpdateHistory(NSString *appName) {
 - (void)checkPreview:(id)sender {
   NSDictionary *doc = GetDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], nil); [self refreshConsole:nil];
   if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
-  NSString *status = doc[@"status"] ?: @""; if ([status isEqualToString:@"complete"] || [status isEqualToString:@"error"]) { if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]]; if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
+  NSString *status = doc[@"status"] ?: @""; if ([status isEqualToString:@"complete"] || [status isEqualToString:@"error"]) {
+    if ([status isEqualToString:@"complete"]) {
+      NSString *errorText = nil;
+      if ([self openPreviewWindowWithSource:[self combinedSource] errorText:&errorText]) [self appendConsole:@"Opened preview window"];
+      else [self appendConsole:errorText ?: @"Could not open preview window"];
+    } else {
+      if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
+    }
+    if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
   [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 @end

@@ -1,9 +1,9 @@
 # SwiftStudio
 
-SwiftStudio is a pair of native macOS terminal-runnable GUI apps:
+SwiftStudio contains native macOS terminal-runnable GUI apps:
 
-- `code_studio`: a SwiftUI project/file editor that sends raw source through Firestore.
-- `preview_runner`: a companion runner that watches Firestore, compiles SwiftUI with `swiftc`, opens the preview window, and reports status back.
+- `code_studio`: a SwiftUI project/file editor that sends raw source through Firestore and opens the preview window after the runner reports success.
+- `preview_runner`: companion source is included for the runner side. It silently compiles/checks SwiftUI and reports status back; it does not open the preview window.
 
 The repository is configured for the GitHub repo:
 
@@ -19,13 +19,15 @@ After pushing this folder to GitHub, install with:
 curl -fsSL https://raw.githubusercontent.com/Bluegrayfoo/SwiftStudio/main/install.sh | bash
 ```
 
+That command installs `~/cmds/code_studio` and opens the SwiftStudio window.
+
 Local install from a clone:
 
 ```bash
 ./install.sh
 ```
 
-The installer builds native Cocoa executables and places them in:
+The installer builds the native Cocoa Studio executable and places it in:
 
 ```text
 ~/cmds
@@ -33,16 +35,16 @@ The installer builds native Cocoa executables and places them in:
 
 ## Run
 
-Open the runner:
-
-```bash
-~/cmds/preview_runner --all
-```
-
 Open the studio:
 
 ```bash
 ~/cmds/code_studio --thread Thread1
+```
+
+Install without automatically opening the window:
+
+```bash
+SWIFTSTUDIO_NO_LAUNCH=1 curl -fsSL https://raw.githubusercontent.com/Bluegrayfoo/SwiftStudio/main/install.sh | bash
 ```
 
 ## Firestore Paths
@@ -55,7 +57,7 @@ SwiftStudio uses the Firebase project embedded in the source.
 - `Percent/Compile.%`
 - `LatestHistory/History.hist`
 
-`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, launches the compiled executable, and writes the preview/status back.
+`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, and writes the status back. When Studio sees a successful response, Studio opens the preview window.
 
 ## Requirements
 
