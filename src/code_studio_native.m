@@ -294,7 +294,7 @@ static void UpdateHistory(NSString *appName) {
     if (errorText) *errorText = @"Compiled executable had no chunks.";
     return NO;
   }
-  SetPercent(@"Run", 45);
+  SetPercent(@"Run", 50);
   dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
   NSString *thread = self.initialThread ?: @"Thread1";
   NSMutableArray *chunks = [NSMutableArray arrayWithCapacity:(NSUInteger)chunkCount];
@@ -315,7 +315,7 @@ static void UpdateHistory(NSString *appName) {
         if (data.length) chunks[(NSUInteger)i] = data;
         completedChunks++;
         double downloadProgress = 45.0 + (((double)completedChunks) / MAX(1.0, (double)chunkCount)) * 20.0;
-        SetPercent(@"Run", downloadProgress);
+        SetPercent(@"Run", MAX(50.0, downloadProgress));
       }
       dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
       dispatch_group_leave(group);
@@ -405,7 +405,7 @@ static void UpdateHistory(NSString *appName) {
   [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)];
 }
 - (void)sendForPreview:(id)sender {
-  [self saveEditor]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); SetPercent(@"Run", 0); [self refreshConsole:nil];
+  [self saveEditor]; self.consoleLog = [NSMutableString string]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); SetPercent(@"Run", 0); [self refreshConsole:nil];
   NSDictionary *p = [self project]; NSError *error = nil;
   SetPercent(@"Send", 35);
   NSString *source = [self combinedSource];
@@ -428,6 +428,7 @@ static void UpdateHistory(NSString *appName) {
       if (self.openingPreview) return;
       self.openingPreview = YES;
       SetPercent(@"Compile", 100);
+      SetPercent(@"Run", 50);
       [self refreshConsole:nil];
       NSDictionary *compiledDoc = [doc copy];
       dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{

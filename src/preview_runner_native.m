@@ -147,7 +147,7 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
   NSString *exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@", requestID];
   exeName = [[exeName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"-"];
   NSString *exePath = [dir stringByAppendingPathComponent:exeName];
-  NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"];
+  NSString *cache = [@"~/cmds/.swiftstudio-module-cache" stringByExpandingTildeInPath];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
   NSString *hosted = [NSString stringWithFormat:@"import AppKit\n%@\n\n@main\nstruct PreviewHostApp: App {\n    init() {\n        NSApplication.shared.activate(ignoringOtherApps: true)\n    }\n\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n", StripPreviewBlocks(source)];
@@ -201,7 +201,7 @@ static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestI
     NSString *chunkPath = [NSString stringWithFormat:@"Threads/%@/Compiled/%@-%04lu", thread, requestID, (unsigned long)i];
     BOOL ok = PatchDocument(chunkPath, @{@"requestId": requestID, @"index": @(i), @"data": chunk}, outError);
     if (!ok) return nil;
-    double uploadProgress = 5.0 + (((double)i + 1.0) / MAX(1.0, (double)count)) * 35.0;
+    double uploadProgress = 5.0 + (((double)i + 1.0) / MAX(1.0, (double)count)) * 39.0;
     SetPercent(@"Run", uploadProgress);
   }
   return @{
