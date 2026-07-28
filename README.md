@@ -33,6 +33,12 @@ The installer builds the native Cocoa Studio executable and places it in:
 ~/cmds
 ```
 
+Install the headless runner on the runner computer with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Bluegrayfoo/SwiftStudio/main/install_runner.sh | bash
+```
+
 ## Run
 
 Open the studio:
@@ -57,7 +63,7 @@ SwiftStudio uses the Firebase project embedded in the source.
 - `Percent/Compile.%`
 - `LatestHistory/History.hist`
 
-`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, and writes the status back. When Studio sees a successful response, Studio opens the preview window.
+`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio opens the preview window on the Studio computer.
 
 ## Requirements
 
