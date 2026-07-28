@@ -1,5 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <float.h>
+#import <sys/stat.h>
 
 static NSString *const APIKey = @"AIzaSyDYduyE8CvW-Fm5lBwTsV8JrChA_hjs8Qo";
 static NSString *const ProjectID = @"bytehelper-c7794";
@@ -198,36 +199,53 @@ static void UpdateHistory(NSString *appName) {
 - (NSString *)combinedSource {
   NSMutableString *source = [NSMutableString string]; for (NSString *fid in self.fileIDs) { [source appendFormat:@"\n// %@.swift\n%@\n", fid, [self project][@"files"][fid][@"code"] ?: @""]; } return source;
 }
-- (NSString *)stripPreviewBlocks:(NSString *)source {
-  NSMutableString *out = [NSMutableString string]; NSArray *lines = [source componentsSeparatedByString:@"\n"]; BOOL skipping = NO; NSInteger depth = 0;
-  for (NSString *line in lines) {
-    if (!skipping && [line rangeOfString:@"#Preview"].location != NSNotFound) { skipping = YES; depth = 0; }
-    if (skipping) {
-      for (NSUInteger i=0; i<line.length; i++) { unichar c=[line characterAtIndex:i]; if (c=='{') depth++; if (c=='}') depth--; }
-      if (depth <= 0 && [line rangeOfString:@"}"].location != NSNotFound) skipping = NO;
-      continue;
-    }
-    [out appendFormat:@"%@\n", line];
+- (BOOL)openPreviewWindowFromCompiledDocument:(NSDictionary *)doc errorText:(NSString **)errorText {
+  NSString *requestID = doc[@"compiledRequestId"];
+  NSNumber *chunkCountNumber = doc[@"compiledChunkCount"];
+  if (self.pendingRequestID.length && ![requestID isEqualToString:self.pendingRequestID]) {
+    if (errorText) *errorText = @"Compiled executable did not match this send request.";
+    return NO;
   }
-  return out;
-}
-- (BOOL)openPreviewWindowWithSource:(NSString *)source errorText:(NSString **)errorText {
+  if (!requestID.length || !chunkCountNumber) {
+    if (errorText) *errorText = @"Runner did not send a compiled executable.";
+    return NO;
+  }
+  NSInteger chunkCount = chunkCountNumber.integerValue;
+  if (chunkCount <= 0) {
+    if (errorText) *errorText = @"Compiled executable had no chunks.";
+    return NO;
+  }
+  NSMutableString *base64 = [NSMutableString string];
+  NSString *thread = self.initialThread ?: @"Thread1";
+  for (NSInteger i = 0; i < chunkCount; i++) {
+    NSError *error = nil;
+    NSString *chunkPath = [NSString stringWithFormat:@"Threads/%@/Compiled/%@-%04ld", thread, requestID, (long)i];
+    NSDictionary *chunk = GetDocument(chunkPath, &error);
+    if (error) {
+      if (errorText) *errorText = error.localizedDescription;
+      return NO;
+    }
+    NSString *data = chunk[@"data"];
+    if (!data.length) {
+      if (errorText) *errorText = [NSString stringWithFormat:@"Missing compiled executable chunk %ld.", (long)i];
+      return NO;
+    }
+    [base64 appendString:data];
+  }
+  NSData *exeData = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
+  if (!exeData.length) {
+    if (errorText) *errorText = @"Could not decode compiled executable.";
+    return NO;
+  }
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-preview-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-  NSString *sourcePath = [dir stringByAppendingPathComponent:@"Preview.swift"];
   NSString *exe = [dir stringByAppendingPathComponent:@"PreviewApp"];
-  NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"];
-  [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
-  NSString *hosted = [[self stripPreviewBlocks:source] stringByAppendingString:@"\n\n@main\nstruct PreviewHostApp: App {\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n"];
-  [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-  NSTask *compile = [NSTask new]; compile.launchPath = @"/usr/bin/swiftc"; compile.arguments = @[@"-parse-as-library", @"-module-cache-path", cache, sourcePath, @"-o", exe];
-  NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy]; env[@"CLANG_MODULE_CACHE_PATH"] = cache; compile.environment = env;
-  NSPipe *outPipe = [NSPipe pipe]; NSPipe *errPipe = [NSPipe pipe]; compile.standardOutput = outPipe; compile.standardError = errPipe; NSDate *start = NSDate.date; [compile launch];
-  while (compile.isRunning && [NSDate.date timeIntervalSinceDate:start] < 75) [NSThread sleepForTimeInterval:0.15];
-  if (compile.isRunning) { [compile terminate]; if (errorText) *errorText = @"Preview window compile timed out."; return NO; }
-  NSString *compilerOut = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
-  NSString *compilerErr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
-  if (compile.terminationStatus != 0) { if (errorText) *errorText = compilerErr.length ? compilerErr : (compilerOut.length ? compilerOut : @"Preview window compile failed."); return NO; }
+  NSError *writeError = nil;
+  if (![exeData writeToFile:exe options:NSDataWritingAtomic error:&writeError]) {
+    if (errorText) *errorText = writeError.localizedDescription;
+    return NO;
+  }
+  chmod(exe.fileSystemRepresentation, 0700);
   NSTask *run = [NSTask new]; run.launchPath = exe; run.standardOutput = [NSPipe pipe]; run.standardError = [NSPipe pipe]; [run launch];
   return YES;
 }
@@ -248,7 +266,7 @@ static void UpdateHistory(NSString *appName) {
   SetPercent(@"Send", 35);
   NSString *source = [self combinedSource];
   SetPercent(@"Send", 70);
-  BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date}, &error);
+  BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date, @"compiledRequestId":@"", @"compiledChunkCount":@0, @"compiledSize":@0}, &error);
   SetPercent(@"Send", ok ? 100 : 0); [self refreshConsole:nil]; if (!ok) { [self appendConsole:[NSString stringWithFormat:@"Send failed: %@", error.localizedDescription]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
   [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
@@ -257,15 +275,21 @@ static void UpdateHistory(NSString *appName) {
   if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
   NSString *status = doc[@"status"] ?: @""; if ([status isEqualToString:@"complete"] || [status isEqualToString:@"error"]) {
     if ([status isEqualToString:@"complete"]) {
+      NSString *compiledRequestID = doc[@"compiledRequestId"];
+      NSNumber *compiledChunkCount = doc[@"compiledChunkCount"];
+      if (![compiledRequestID isEqualToString:self.pendingRequestID] || compiledChunkCount.integerValue <= 0) {
+        [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
+        return;
+      }
       if (self.openingPreview) return;
       self.openingPreview = YES;
       SetPercent(@"Compile", 100);
       [self refreshConsole:nil];
       [self appendConsole:@"Opening preview window..."];
-      NSString *source = [[self combinedSource] copy];
+      NSDictionary *compiledDoc = [doc copy];
       dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *errorText = nil;
-        BOOL opened = [self openPreviewWindowWithSource:source errorText:&errorText];
+        BOOL opened = [self openPreviewWindowFromCompiledDocument:compiledDoc errorText:&errorText];
         dispatch_async(dispatch_get_main_queue(), ^{
           if (opened) [self appendConsole:@"Opened preview window"];
           else [self appendConsole:errorText ?: @"Could not open preview window"];

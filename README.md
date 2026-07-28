@@ -2,8 +2,8 @@
 
 SwiftStudio contains native macOS terminal-runnable GUI apps:
 
-- `code_studio`: a SwiftUI project/file editor that sends raw source through Firestore and opens the preview window after the runner reports success.
-- `preview_runner`: companion source is included for the runner side. It silently compiles/checks SwiftUI and reports status back; it does not open the preview window.
+- `code_studio`: a SwiftUI project/file editor that sends raw source through Firestore, downloads the compiled executable returned by the runner, and opens that executable locally.
+- `preview_runner`: companion source is included for the runner side. It silently compiles SwiftUI into an executable, uploads that executable through Firestore chunks, and reports status back; it does not open the preview window.
 
 The repository is configured for the GitHub repo:
 
@@ -61,9 +61,10 @@ SwiftStudio uses the Firebase project embedded in the source.
 - `Threads/Thread2.send`
 - `Percent/Send.%`
 - `Percent/Compile.%`
+- `Threads/<thread>/Compiled/<requestId>-0000...`
 - `LatestHistory/History.hist`
 
-`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio opens the preview window on the Studio computer.
+`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, uploads the compiled executable as base64 chunks, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio downloads the compiled executable, writes it to a local temp file, and opens the preview window on the Studio computer.
 
 ## Requirements
 

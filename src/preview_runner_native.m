@@ -139,20 +139,21 @@ static NSString *StripPreviewBlocks(NSString *source) {
   return out;
 }
 
-static NSDictionary *CompileOnly(NSString *source) {
+static NSDictionary *CompileExecutable(NSString *source) {
   SetPercent(@"Compile", 3);
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-compile-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
   NSString *sourcePath = [dir stringByAppendingPathComponent:@"Preview.swift"];
+  NSString *exePath = [dir stringByAppendingPathComponent:@"PreviewApp"];
   NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
-  NSString *hosted = [StripPreviewBlocks(source) stringByAppendingString:@"\n\n@MainActor\nprivate func __swiftStudioPreviewTypecheck() -> some View {\n    ContentView()\n}\n"];
+  NSString *hosted = [StripPreviewBlocks(source) stringByAppendingString:@"\n\n@main\nstruct PreviewHostApp: App {\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n"];
   [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   SetPercent(@"Compile", 22);
   NSTask *compile = [NSTask new];
   compile.launchPath = @"/usr/bin/swiftc";
-  compile.arguments = @[@"-typecheck", @"-parse-as-library", @"-module-cache-path", cache, sourcePath];
+  compile.arguments = @[@"-parse-as-library", @"-module-cache-path", cache, sourcePath, @"-o", exePath];
   NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
   env[@"CLANG_MODULE_CACHE_PATH"] = cache;
   compile.environment = env;
@@ -181,7 +182,29 @@ static NSDictionary *CompileOnly(NSString *source) {
   if (compile.terminationStatus != 0) {
     return @{@"ok": @NO, @"preview": compilerOut.length ? compilerOut : @"SwiftUI compile failed.", @"error": compilerErr};
   }
-  return @{@"ok": @YES, @"preview": @"Ready for Studio preview", @"error": @""};
+  return @{@"ok": @YES, @"preview": @"Compiled executable for Studio", @"error": @"", @"executablePath": exePath};
+}
+
+static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestID, NSString *exePath, NSError **outError) {
+  NSData *data = [NSData dataWithContentsOfFile:exePath options:0 error:outError];
+  if (!data) return nil;
+  NSString *base64 = [data base64EncodedStringWithOptions:0];
+  NSUInteger chunkSize = 600000;
+  NSUInteger count = (base64.length + chunkSize - 1) / chunkSize;
+  for (NSUInteger i = 0; i < count; i++) {
+    NSUInteger start = i * chunkSize;
+    NSUInteger length = MIN(chunkSize, base64.length - start);
+    NSString *chunk = [base64 substringWithRange:NSMakeRange(start, length)];
+    NSString *chunkPath = [NSString stringWithFormat:@"Threads/%@/Compiled/%@-%04lu", thread, requestID, (unsigned long)i];
+    BOOL ok = PatchDocument(chunkPath, @{@"requestId": requestID, @"index": @(i), @"data": chunk}, outError);
+    if (!ok) return nil;
+  }
+  return @{
+    @"compiledRequestId": requestID,
+    @"compiledChunkCount": @(count),
+    @"compiledSize": @(data.length),
+    @"compiledAt": NSDate.date
+  };
 }
 
 static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
@@ -214,9 +237,18 @@ int main(int argc, const char *argv[]) {
         seen[thread] = requestID;
         NSString *appName = remote[@"appName"] ?: @"SwiftUI App";
         PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": @"running", @"startedAt": NSDate.date}, nil);
-        NSDictionary *result = CompileOnly(source);
+        NSDictionary *result = CompileExecutable(source);
         BOOL ok = [result[@"ok"] boolValue];
-        PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": ok ? @"complete" : @"error", @"preview": result[@"preview"] ?: @"", @"error": result[@"error"] ?: @"", @"completedAt": NSDate.date}, nil);
+        NSDictionary *compiledMetadata = @{};
+        if (ok) {
+          NSError *uploadError = nil;
+          compiledMetadata = UploadExecutableChunks(thread, requestID, result[@"executablePath"], &uploadError);
+          ok = compiledMetadata != nil;
+          if (!ok) result = @{@"ok": @NO, @"preview": @"Compiled executable upload failed.", @"error": uploadError.localizedDescription ?: @""};
+        }
+        NSMutableDictionary *finalPayload = [@{@"status": ok ? @"complete" : @"error", @"preview": result[@"preview"] ?: @"", @"error": result[@"error"] ?: @"", @"completedAt": NSDate.date} mutableCopy];
+        [finalPayload addEntriesFromDictionary:compiledMetadata];
+        PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], finalPayload, nil);
         if (ok) UpdateHistory(appName);
         printf("%s: %s\n", thread.UTF8String, ok ? "complete" : "error");
       }
