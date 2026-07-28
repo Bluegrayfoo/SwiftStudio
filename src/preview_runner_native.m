@@ -150,7 +150,7 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
   NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
-  NSString *hosted = [StripPreviewBlocks(source) stringByAppendingString:@"\n\n@main\nstruct PreviewHostApp: App {\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n"];
+  NSString *hosted = [NSString stringWithFormat:@"import AppKit\n%@\n\n@main\nstruct PreviewHostApp: App {\n    init() {\n        NSApplication.shared.activate(ignoringOtherApps: true)\n    }\n\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n", StripPreviewBlocks(source)];
   [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   SetPercent(@"Compile", 22);
   NSTask *compile = [NSTask new];
@@ -188,6 +188,7 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
 }
 
 static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestID, NSString *exePath, NSString *exeName, NSError **outError) {
+  SetPercent(@"Run", 5);
   NSData *data = [NSData dataWithContentsOfFile:exePath options:0 error:outError];
   if (!data) return nil;
   NSString *base64 = [data base64EncodedStringWithOptions:0];
@@ -200,6 +201,8 @@ static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestI
     NSString *chunkPath = [NSString stringWithFormat:@"Threads/%@/Compiled/%@-%04lu", thread, requestID, (unsigned long)i];
     BOOL ok = PatchDocument(chunkPath, @{@"requestId": requestID, @"index": @(i), @"data": chunk}, outError);
     if (!ok) return nil;
+    double uploadProgress = 5.0 + (((double)i + 1.0) / MAX(1.0, (double)count)) * 35.0;
+    SetPercent(@"Run", uploadProgress);
   }
   return @{
     @"compiledRequestId": requestID,
@@ -239,6 +242,7 @@ int main(int argc, const char *argv[]) {
         if (!requestID.length || !source.length || [seen[thread] isEqualToString:requestID]) continue;
         seen[thread] = requestID;
         NSString *appName = remote[@"appName"] ?: @"SwiftUI App";
+        SetPercent(@"Run", 0);
         PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": @"running", @"startedAt": NSDate.date}, nil);
         NSDictionary *result = CompileExecutable(source, requestID);
         BOOL ok = [result[@"ok"] boolValue];

@@ -103,6 +103,8 @@ static void UpdateHistory(NSString *appName) {
 @property BOOL openingPreview;
 @property double lastSendPercent;
 @property double lastCompilePercent;
+@property double lastRunPercent;
+@property NSTask *previewTask;
 @end
 
 @implementation StudioDelegate
@@ -217,6 +219,8 @@ static void UpdateHistory(NSString *appName) {
     if (errorText) *errorText = @"Compiled executable had no chunks.";
     return NO;
   }
+  SetPercent(@"Run", 45);
+  dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
   NSMutableString *base64 = [NSMutableString string];
   NSString *thread = self.initialThread ?: @"Thread1";
   for (NSInteger i = 0; i < chunkCount; i++) {
@@ -233,12 +237,19 @@ static void UpdateHistory(NSString *appName) {
       return NO;
     }
     [base64 appendString:data];
+    double downloadProgress = 45.0 + (((double)i + 1.0) / MAX(1.0, (double)chunkCount)) * 20.0;
+    SetPercent(@"Run", downloadProgress);
+    dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
   }
+  SetPercent(@"Run", 70);
+  dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
   NSData *exeData = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
   if (!exeData.length) {
     if (errorText) *errorText = @"Could not decode compiled executable.";
     return NO;
   }
+  SetPercent(@"Run", 78);
+  dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-preview-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
   NSString *exeName = doc[@"compiledExecutableName"];
@@ -250,27 +261,57 @@ static void UpdateHistory(NSString *appName) {
     if (errorText) *errorText = writeError.localizedDescription;
     return NO;
   }
+  SetPercent(@"Run", 85);
+  dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
   chmod(exe.fileSystemRepresentation, 0700);
-  NSTask *run = [NSTask new]; run.launchPath = exe; run.standardOutput = [NSPipe pipe]; run.standardError = [NSPipe pipe]; [run launch];
-  return YES;
+  SetPercent(@"Run", 90);
+  dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
+  __block BOOL launched = NO;
+  __block NSString *launchError = nil;
+  dispatch_semaphore_t launchedSem = dispatch_semaphore_create(0);
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    [NSApp activateIgnoringOtherApps:YES];
+    NSTask *run = [NSTask new];
+    run.launchPath = exe;
+    run.standardOutput = [NSPipe pipe];
+    run.standardError = [NSPipe pipe];
+    @try {
+      SetPercent(@"Run", 95);
+      [self refreshConsole:nil];
+      [run launch];
+      self.previewTask = run;
+      [[NSRunningApplication currentApplication] activateWithOptions:NSApplicationActivateAllWindows];
+      launched = run.running;
+      if (launched) SetPercent(@"Run", 100);
+      if (!launched) launchError = @"Preview executable started and exited immediately.";
+    } @catch (NSException *exception) {
+      launchError = exception.reason ?: @"Preview executable launch failed.";
+    }
+    dispatch_semaphore_signal(launchedSem);
+  });
+  dispatch_semaphore_wait(launchedSem, DISPATCH_TIME_FOREVER);
+  if (!launched && errorText) *errorText = launchError ?: @"Preview executable launch failed.";
+  return launched;
 }
 - (NSString *)bar:(double)value { NSInteger fill = (NSInteger)round(MAX(0, MIN(100, value)) * 15.0 / 100.0); NSMutableString *s = [@"[" mutableCopy]; for (NSInteger i=0;i<fill;i++) [s appendString:@"="]; [s appendString:@">"]; for (NSInteger i=fill;i<15;i++) [s appendString:@" "]; [s appendString:@"]"]; return s; }
 - (void)appendConsole:(NSString *)line { if (!self.consoleLog) self.consoleLog = [NSMutableString string]; if (line.length) [self.consoleLog appendFormat:@"%@\n", line]; [self refreshConsole:nil]; }
 - (void)refreshConsole:(id)sender {
   if (!self.console) return;
   if (!self.pendingRequestID) { self.console.string = self.consoleLog ?: @""; [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)]; return; }
-  double send = [GetDocument(@"Percent/Send", nil)[@"%"] doubleValue]; double compile = [GetDocument(@"Percent/Compile", nil)[@"%"] doubleValue];
+  double send = [GetDocument(@"Percent/Send", nil)[@"%"] doubleValue]; double compile = [GetDocument(@"Percent/Compile", nil)[@"%"] doubleValue]; double run = [GetDocument(@"Percent/Run", nil)[@"%"] doubleValue];
   self.lastSendPercent = MAX(self.lastSendPercent, send);
   self.lastCompilePercent = MAX(self.lastCompilePercent, compile);
+  self.lastRunPercent = MAX(self.lastRunPercent, run);
   send = self.lastSendPercent;
   compile = self.lastCompilePercent;
-  NSMutableString *text = [NSMutableString stringWithFormat:@"Sending...%@ %.0f%%\nCompiling...%@ %.0f%%\n", [self bar:send], send, [self bar:compile], compile];
+  run = self.lastRunPercent;
+  NSMutableString *text = [NSMutableString stringWithFormat:@"Sending...%@ %.0f%%\nCompiling...%@ %.0f%%\nRunning...%@ %.0f%%\n", [self bar:send], send, [self bar:compile], compile, [self bar:run], run];
   [text appendString:self.consoleLog ?: @""];
   self.console.string = text;
   [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)];
 }
 - (void)sendForPreview:(id)sender {
-  [self saveEditor]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 0; self.lastCompilePercent = 0; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); [self refreshConsole:nil];
+  [self saveEditor]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); SetPercent(@"Run", 0); [self refreshConsole:nil];
   NSDictionary *p = [self project]; NSError *error = nil;
   SetPercent(@"Send", 35);
   NSString *source = [self combinedSource];
@@ -294,7 +335,6 @@ static void UpdateHistory(NSString *appName) {
       self.openingPreview = YES;
       SetPercent(@"Compile", 100);
       [self refreshConsole:nil];
-      [self appendConsole:@"Opening preview window..."];
       NSDictionary *compiledDoc = [doc copy];
       dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *errorText = nil;
@@ -307,6 +347,7 @@ static void UpdateHistory(NSString *appName) {
           self.openingPreview = NO;
           self.lastSendPercent = 0;
           self.lastCompilePercent = 0;
+          self.lastRunPercent = 0;
           [self refreshConsole:nil];
         });
       });
@@ -314,7 +355,7 @@ static void UpdateHistory(NSString *appName) {
     } else {
       if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
     }
-    if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; self.lastSendPercent = 0; self.lastCompilePercent = 0; [self refreshConsole:nil]; return; }
+    if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; [self refreshConsole:nil]; return; }
   [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 @end

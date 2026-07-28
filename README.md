@@ -61,10 +61,26 @@ SwiftStudio uses the Firebase project embedded in the source.
 - `Threads/Thread2.send`
 - `Percent/Send.%`
 - `Percent/Compile.%`
+- `Percent/Run.%`
 - `Threads/<thread>/Compiled/<requestId>-0000...`
 - `LatestHistory/History.hist`
 
-`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, uploads the compiled executable as base64 chunks, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio downloads the compiled executable, writes it to a uniquely named local temp executable for that request, and opens the preview window on the Studio computer.
+`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, uploads the compiled executable as base64 chunks, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio downloads the compiled executable, writes it to a uniquely named local temp executable for that request, and opens the preview window on the Studio computer from Studio's main thread.
+
+The generated preview host activates itself on launch, and Studio retains the preview task so the process lifecycle is not lost immediately after launch.
+
+`Percent/Run.%` represents the post-compile workflow:
+
+```text
+Runner uploads executable chunks
+Studio downloads all chunks
+Studio base64-decodes them
+Studio writes the executable to disk
+Studio chmods it executable
+Studio launches it with NSTask
+SwiftUI runtime starts
+Window appears
+```
 
 ## Requirements
 
