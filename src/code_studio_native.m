@@ -221,28 +221,47 @@ static void UpdateHistory(NSString *appName) {
   }
   SetPercent(@"Run", 45);
   dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
-  NSMutableString *base64 = [NSMutableString string];
   NSString *thread = self.initialThread ?: @"Thread1";
+  NSMutableArray *chunks = [NSMutableArray arrayWithCapacity:(NSUInteger)chunkCount];
+  for (NSInteger i = 0; i < chunkCount; i++) [chunks addObject:[NSNull null]];
+  __block NSString *downloadError = nil;
+  __block NSInteger completedChunks = 0;
+  dispatch_group_t group = dispatch_group_create();
   for (NSInteger i = 0; i < chunkCount; i++) {
-    NSError *error = nil;
-    NSString *chunkPath = [NSString stringWithFormat:@"Threads/%@/Compiled/%@-%04ld", thread, requestID, (long)i];
-    NSDictionary *chunk = GetDocument(chunkPath, &error);
-    if (error) {
-      if (errorText) *errorText = error.localizedDescription;
-      return NO;
-    }
-    NSString *data = chunk[@"data"];
-    if (!data.length) {
-      if (errorText) *errorText = [NSString stringWithFormat:@"Missing compiled executable chunk %ld.", (long)i];
-      return NO;
-    }
-    [base64 appendString:data];
-    double downloadProgress = 45.0 + (((double)i + 1.0) / MAX(1.0, (double)chunkCount)) * 20.0;
-    SetPercent(@"Run", downloadProgress);
-    dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
+    dispatch_group_enter(group);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      NSError *error = nil;
+      NSString *chunkPath = [NSString stringWithFormat:@"Threads/%@/Compiled/%@-%04ld", thread, requestID, (long)i];
+      NSDictionary *chunk = GetDocument(chunkPath, &error);
+      @synchronized (chunks) {
+        if (error && !downloadError) downloadError = error.localizedDescription;
+        NSString *data = chunk[@"data"];
+        if (!error && !data.length && !downloadError) downloadError = [NSString stringWithFormat:@"Missing compiled executable chunk %ld.", (long)i];
+        if (data.length) chunks[(NSUInteger)i] = data;
+        completedChunks++;
+        double downloadProgress = 45.0 + (((double)completedChunks) / MAX(1.0, (double)chunkCount)) * 20.0;
+        SetPercent(@"Run", downloadProgress);
+      }
+      dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
+      dispatch_group_leave(group);
+    });
+  }
+  dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+  if (downloadError.length) {
+    if (errorText) *errorText = downloadError;
+    return NO;
   }
   SetPercent(@"Run", 70);
   dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
+  NSMutableString *base64 = [NSMutableString string];
+  for (NSInteger i = 0; i < chunkCount; i++) {
+    id chunk = chunks[(NSUInteger)i];
+    if (![chunk isKindOfClass:[NSString class]]) {
+      if (errorText) *errorText = [NSString stringWithFormat:@"Missing compiled executable chunk %ld.", (long)i];
+      return NO;
+    }
+    [base64 appendString:chunk];
+  }
   NSData *exeData = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
   if (!exeData.length) {
     if (errorText) *errorText = @"Could not decode compiled executable.";
@@ -250,7 +269,7 @@ static void UpdateHistory(NSString *appName) {
   }
   SetPercent(@"Run", 78);
   dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
-  NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-preview-%@", NSUUID.UUID.UUIDString]];
+  NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"swiftstudio-preview-current"];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
   NSString *exeName = doc[@"compiledExecutableName"];
   if (!exeName.length) exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@", requestID];
@@ -273,8 +292,8 @@ static void UpdateHistory(NSString *appName) {
     [NSApp activateIgnoringOtherApps:YES];
     NSTask *run = [NSTask new];
     run.launchPath = exe;
-    run.standardOutput = [NSPipe pipe];
-    run.standardError = [NSPipe pipe];
+    run.standardOutput = nil;
+    run.standardError = nil;
     @try {
       SetPercent(@"Run", 95);
       [self refreshConsole:nil];
@@ -318,17 +337,17 @@ static void UpdateHistory(NSString *appName) {
   SetPercent(@"Send", 70);
   BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date, @"compiledRequestId":@"", @"compiledChunkCount":@0, @"compiledSize":@0}, &error);
   SetPercent(@"Send", ok ? 100 : 0); [self refreshConsole:nil]; if (!ok) { [self appendConsole:[NSString stringWithFormat:@"Send failed: %@", error.localizedDescription]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
-  [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
+  [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 - (void)checkPreview:(id)sender {
   NSDictionary *doc = GetDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], nil); [self refreshConsole:nil];
-  if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
+  if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
   NSString *status = doc[@"status"] ?: @""; if ([status isEqualToString:@"complete"] || [status isEqualToString:@"error"]) {
     if ([status isEqualToString:@"complete"]) {
       NSString *compiledRequestID = doc[@"compiledRequestId"];
       NSNumber *compiledChunkCount = doc[@"compiledChunkCount"];
       if (![compiledRequestID isEqualToString:self.pendingRequestID] || compiledChunkCount.integerValue <= 0) {
-        [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
+        [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
         return;
       }
       if (self.openingPreview) return;
@@ -356,7 +375,7 @@ static void UpdateHistory(NSString *appName) {
       if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
     }
     if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; [self refreshConsole:nil]; return; }
-  [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
+  [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 @end
 

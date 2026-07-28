@@ -82,6 +82,8 @@ SwiftUI runtime starts
 Window appears
 ```
 
+Studio downloads executable chunks concurrently, and the runner uses larger chunk documents to reduce request count. Studio and runner also use shorter polling intervals so completed work is noticed faster.
+
 ## Requirements
 
 - macOS

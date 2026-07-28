@@ -192,7 +192,7 @@ static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestI
   NSData *data = [NSData dataWithContentsOfFile:exePath options:0 error:outError];
   if (!data) return nil;
   NSString *base64 = [data base64EncodedStringWithOptions:0];
-  NSUInteger chunkSize = 600000;
+  NSUInteger chunkSize = 900000;
   NSUInteger count = (base64.length + chunkSize - 1) / chunkSize;
   for (NSUInteger i = 0; i < count; i++) {
     NSUInteger start = i * chunkSize;
@@ -259,7 +259,7 @@ int main(int argc, const char *argv[]) {
         if (ok) UpdateHistory(appName);
         printf("%s: %s\n", thread.UTF8String, ok ? "complete" : "error");
       }
-      [NSThread sleepForTimeInterval:1.5];
+      [NSThread sleepForTimeInterval:0.5];
     }
   }
 }
