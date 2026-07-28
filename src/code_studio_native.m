@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <dlfcn.h>
 #import <float.h>
 #import <sys/stat.h>
 
@@ -85,7 +86,7 @@ static void UpdateHistory(NSString *appName) {
   hist[stamp] = @{@"text":[NSString stringWithFormat:@"%@ was run at %@ on %@", appName, [tf stringFromDate:now], [df stringFromDate:now]], @"timestamp":stamp}; PatchDocument(@"LatestHistory/History", @{@"hist":hist}, nil);
 }
 
-@interface StudioDelegate : NSObject <NSApplicationDelegate, NSTextViewDelegate>
+@interface StudioDelegate : NSObject <NSApplicationDelegate, NSTextViewDelegate, NSWindowDelegate>
 @property NSWindow *window;
 @property NSView *root;
 @property NSMutableDictionary *store;
@@ -106,14 +107,22 @@ static void UpdateHistory(NSString *appName) {
 @property double lastRunPercent;
 @property NSTask *previewTask;
 @property BOOL applyingHighlight;
+@property BOOL previewPaneCollapsed;
+@property BOOL previewPaneWide;
+@property NSRect previewPaneFrame;
+@property NSView *previewContainerView;
+@property NSView *previewContentView;
+@property NSWindow *previewWindow;
+@property void *previewLibraryHandle;
 @end
 
 @implementation StudioDelegate
 - (NSString *)docsPath { return [@"~/cmds/swift_studio_projects.json" stringByExpandingTildeInPath]; }
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
-  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; self.dynamicViews = [NSMutableArray array]; self.ageLabels = [NSMutableDictionary dictionary]; self.consoleLog = [NSMutableString string]; self.swiftLogo = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/swiftlogo.png" stringByExpandingTildeInPath]];
+  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; self.dynamicViews = [NSMutableArray array]; self.ageLabels = [NSMutableDictionary dictionary]; self.consoleLog = [NSMutableString string]; self.previewPaneCollapsed = YES; self.swiftLogo = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/swiftlogo.png" stringByExpandingTildeInPath]];
   [self loadStore]; [self buildWindow]; [self showMain]; UpdateHistory(@"SwiftStudio"); [NSApp activateIgnoringOtherApps:YES];
   [NSTimer scheduledTimerWithTimeInterval:30 target:self selector:@selector(refreshAgeLabels:) userInfo:nil repeats:YES];
+  [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(updatePreviewPlacement:) userInfo:nil repeats:YES];
 }
 - (void)loadStore {
   NSData *data = [NSData dataWithContentsOfFile:self.docsPath];
@@ -131,6 +140,7 @@ static void UpdateHistory(NSString *appName) {
 - (NSArray *)fileIDs { return [[[self project][@"files"] allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]; }
 - (void)buildWindow {
   self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(80,80,1176,765) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO]; self.window.title = @"SwiftStudio";
+  self.window.delegate = self;
   self.root = [[NSView alloc] initWithFrame:self.window.contentView.bounds]; self.root.autoresizingMask = NSViewWidthSizable|NSViewHeightSizable; self.root.wantsLayer = YES; self.root.layer.backgroundColor = NSColor.blackColor.CGColor; self.window.contentView = self.root; [self.window makeKeyAndOrderFront:nil];
 }
 - (NSTextField *)label:(NSString *)text frame:(NSRect)frame font:(NSFont *)font color:(NSColor *)color {
@@ -138,6 +148,11 @@ static void UpdateHistory(NSString *appName) {
 }
 - (NSButton *)button:(NSString *)title frame:(NSRect)frame action:(SEL)action blue:(BOOL)blue {
   NSButton *b = [[NSButton alloc] initWithFrame:frame]; b.title = title; b.font = TitleFont(frame.size.height * 0.55); b.bezelStyle = NSBezelStyleRegularSquare; b.bordered = NO; b.target = self; b.action = action; b.wantsLayer = YES; b.layer.cornerRadius = frame.size.height/2; b.layer.backgroundColor = (blue ? Blue() : NSColor.clearColor).CGColor; [b setContentTintColor:NSColor.whiteColor]; [self.dynamicViews addObject:b]; [self.root addSubview:b]; return b;
+}
+- (NSButton *)redButton:(NSString *)title frame:(NSRect)frame action:(SEL)action {
+  NSButton *b = [self button:title frame:frame action:action blue:NO];
+  b.layer.backgroundColor = [NSColor colorWithCalibratedRed:0.78 green:0.05 blue:0.06 alpha:1.0].CGColor;
+  return b;
 }
 - (void)tuneScrollView:(NSScrollView *)scrollView {
   scrollView.hasVerticalScroller = YES;
@@ -148,6 +163,12 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)clearDynamic { for (NSView *v in self.dynamicViews) [v removeFromSuperview]; [self.dynamicViews removeAllObjects]; }
 - (void)addLine:(NSRect)frame { NSBox *box = [[NSBox alloc] initWithFrame:frame]; box.boxType = NSBoxCustom; box.borderColor = NSColor.whiteColor; box.fillColor = NSColor.whiteColor; [self.dynamicViews addObject:box]; [self.root addSubview:box]; }
+- (BOOL)isFullScreen { return (self.window.styleMask & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen; }
+- (BOOL)previewPaneVisible { return [self isFullScreen] && !self.previewPaneCollapsed; }
+- (void)updatePreviewPlacement:(id)sender { [self placePreviewContent]; }
+- (void)windowDidResize:(NSNotification *)notification { if (self.showingProject) { [self saveEditor]; [self showProject]; } [self placePreviewContent]; }
+- (void)windowDidEnterFullScreen:(NSNotification *)notification { self.previewPaneCollapsed = NO; if (self.showingProject) [self showProject]; [self placePreviewContent]; }
+- (void)windowDidExitFullScreen:(NSNotification *)notification { if (self.showingProject) [self showProject]; [self placePreviewContent]; }
 - (NSString *)relativeAge:(NSNumber *)stamp {
   double seconds = MAX(0, NSDate.date.timeIntervalSince1970 - stamp.doubleValue);
   if (seconds < 60) return @"now";
@@ -195,12 +216,60 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)showProject {
   self.showingProject = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; NSDictionary *p = [self project]; if (!self.activeFileID) self.activeFileID = p[@"activeFile"] ?: self.fileIDs.firstObject;
-  [self button:@"<" frame:NSMakeRect(18,700,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,680,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,690,190,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Rename" frame:NSMakeRect(448,690,130,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(590,690,170,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,674,1176,2)]; [self addLine:NSMakeRect(244,0,2,674)]; [self addLine:NSMakeRect(246,155,930,2)];
-  CGFloat y = 625; for (NSString *fid in self.fileIDs) { NSDictionary *f = [self project][@"files"][fid]; if (self.swiftLogo) { NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,y-1,32,28)]; iv.image = self.swiftLogo; [self.dynamicViews addObject:iv]; [self.root addSubview:iv]; } [self label:f[@"name"] frame:NSMakeRect(54,y,175,27) font:MonoFont(21) color:NSColor.whiteColor]; NSButton *hit = [self button:@"" frame:NSMakeRect(0,y-4,240,34) action:@selector(selectFile:) blue:NO]; hit.identifier = fid; hit.layer.backgroundColor = ([fid isEqualToString:self.activeFileID] ? Blue() : NSColor.clearColor).CGColor; hit.layer.opacity = [fid isEqualToString:self.activeFileID] ? 0.35 : 0.0; y -= 36; }
-  [self button:@"+" frame:NSMakeRect(18,18,32,32) action:@selector(newFile:) blue:YES];
-  NSScrollView *editScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(264,165,890,490)]; editScroll.borderType = NSNoBorder; [self tuneScrollView:editScroll]; editScroll.wantsLayer = YES; editScroll.layer.backgroundColor = NSColor.blackColor.CGColor;
-  self.editor = [[NSTextView alloc] initWithFrame:editScroll.bounds]; self.editor.font = MonoFont(19); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.automaticQuoteSubstitutionEnabled = NO; self.editor.automaticDashSubstitutionEnabled = NO; self.editor.automaticTextReplacementEnabled = NO; self.editor.allowsUndo = YES; self.editor.delegate = self; self.editor.string = [self file][@"code"] ?: @""; editScroll.documentView = self.editor; [self.dynamicViews addObject:editScroll]; [self.root addSubview:editScroll]; [self applySyntaxHighlighting];
-  NSScrollView *consoleScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(264,16,890,126)]; [self tuneScrollView:consoleScroll]; consoleScroll.wantsLayer = YES; consoleScroll.layer.backgroundColor = NSColor.blackColor.CGColor; self.console = [[NSTextView alloc] initWithFrame:consoleScroll.bounds]; self.console.font = MonoFont(19); self.console.textColor = NSColor.whiteColor; self.console.backgroundColor = NSColor.blackColor; self.console.editable = NO; self.console.verticallyResizable = YES; self.console.maxSize = NSMakeSize(FLT_MAX, FLT_MAX); consoleScroll.documentView = self.console; [self.dynamicViews addObject:consoleScroll]; [self.root addSubview:consoleScroll]; [self refreshConsole:nil];
+  NSRect b = self.root.bounds;
+  CGFloat leftW = 244, headerY = MAX(674, b.size.height - 91), contentTop = headerY - 19, consoleH = 126;
+  BOOL previewVisible = [self previewPaneVisible];
+  CGFloat sideBarW = (previewVisible && self.previewPaneWide) ? 46 : 0;
+  CGFloat editorX = 264, editorY = 165, consoleY = 16;
+  CGFloat previewW = 0, editorW = MAX(260, b.size.width - editorX - 44);
+  if (previewVisible && self.previewPaneWide) {
+    previewW = MAX(260, b.size.width - leftW - sideBarW - 38);
+    editorW = 0;
+    self.previewPaneFrame = NSMakeRect(leftW + sideBarW + 16, consoleY, previewW, contentTop - consoleY);
+  } else if (previewVisible) {
+    previewW = MAX(330, MIN(520, b.size.width * 0.32));
+    CGFloat rightEdge = b.size.width - 22 - previewW;
+    editorW = MAX(260, rightEdge - editorX - 16);
+    previewW = MIN(previewW, MAX(260, b.size.width - (editorX + editorW + 16) - 22));
+    self.previewPaneFrame = NSMakeRect(editorX + editorW + 16, consoleY, previewW, contentTop - consoleY);
+  } else {
+    self.previewPaneFrame = NSZeroRect;
+  }
+  CGFloat editorH = MAX(220, contentTop - editorY);
+  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,190,44) action:@selector(sendForPreview:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(448,headerY+16,112,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(572,headerY+16,130,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(714,headerY+16,170,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)]; [self addLine:NSMakeRect(editorX,155,editorW,2)];
+  if (previewVisible) {
+    CGFloat dividerX = self.previewPaneFrame.origin.x - 9 - sideBarW;
+    [self addLine:NSMakeRect(dividerX, 0, 2, headerY)];
+    if (self.previewPaneWide) {
+      NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect(dividerX + 2, 0, sideBarW, headerY)];
+      bar.wantsLayer = YES; bar.layer.backgroundColor = DarkRow().CGColor;
+      [self.dynamicViews addObject:bar]; [self.root addSubview:bar];
+      [self button:@">|>" frame:NSMakeRect(dividerX + 7, headerY - 70, 36, 32) action:@selector(normalPreviewPane:) blue:YES];
+      [self button:@">|" frame:NSMakeRect(dividerX + 7, headerY - 112, 36, 32) action:@selector(collapsePreviewPane:) blue:YES];
+    } else {
+      [self button:@"|<" frame:NSMakeRect(self.previewPaneFrame.origin.x - 55, headerY + 15, 42, 34) action:@selector(widenPreviewPane:) blue:YES];
+    }
+    self.previewContainerView = [[NSView alloc] initWithFrame:self.previewPaneFrame]; self.previewContainerView.wantsLayer = YES; self.previewContainerView.layer.backgroundColor = NSColor.blackColor.CGColor; self.previewContainerView.layer.borderColor = NSColor.whiteColor.CGColor; self.previewContainerView.layer.borderWidth = 1; [self.dynamicViews addObject:self.previewContainerView]; [self.root addSubview:self.previewContainerView];
+    if (!self.previewContentView) {
+      NSTextField *waiting = [[NSTextField alloc] initWithFrame:NSMakeRect(20, self.previewPaneFrame.size.height - 46, self.previewPaneFrame.size.width - 40, 28)];
+      waiting.stringValue = @"Waiting for preview";
+      waiting.font = MonoFont(18);
+      waiting.textColor = NSColor.whiteColor;
+      waiting.bezeled = NO;
+      waiting.drawsBackground = NO;
+      waiting.editable = NO;
+      waiting.selectable = NO;
+      [self.previewContainerView addSubview:waiting];
+    }
+  } else { self.previewContainerView = nil; }
+  CGFloat y = contentTop - 30; for (NSString *fid in self.fileIDs) { NSDictionary *f = [self project][@"files"][fid]; if (self.swiftLogo) { NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,y-1,32,28)]; iv.image = self.swiftLogo; [self.dynamicViews addObject:iv]; [self.root addSubview:iv]; } [self label:f[@"name"] frame:NSMakeRect(54,y,175,27) font:MonoFont(21) color:NSColor.whiteColor]; NSButton *hit = [self button:@"" frame:NSMakeRect(0,y-4,240,34) action:@selector(selectFile:) blue:NO]; hit.identifier = fid; hit.layer.backgroundColor = ([fid isEqualToString:self.activeFileID] ? Blue() : NSColor.clearColor).CGColor; hit.layer.opacity = [fid isEqualToString:self.activeFileID] ? 0.35 : 0.0; y -= 36; }
+  [self button:@"+" frame:NSMakeRect(18,18,32,32) action:@selector(newFile:) blue:YES]; [self button:(previewVisible ? @"<" : @">") frame:NSMakeRect(58,18,32,32) action:@selector(togglePreviewPane:) blue:YES];
+  if (!self.previewPaneWide) {
+    NSScrollView *editScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(editorX,editorY,editorW,editorH)]; editScroll.borderType = NSNoBorder; [self tuneScrollView:editScroll]; editScroll.wantsLayer = YES; editScroll.layer.backgroundColor = NSColor.blackColor.CGColor;
+    self.editor = [[NSTextView alloc] initWithFrame:editScroll.bounds]; self.editor.font = MonoFont(19); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.automaticQuoteSubstitutionEnabled = NO; self.editor.automaticDashSubstitutionEnabled = NO; self.editor.automaticTextReplacementEnabled = NO; self.editor.allowsUndo = YES; self.editor.delegate = self; self.editor.string = [self file][@"code"] ?: @""; editScroll.documentView = self.editor; [self.dynamicViews addObject:editScroll]; [self.root addSubview:editScroll]; [self applySyntaxHighlighting];
+    NSScrollView *consoleScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(editorX,consoleY,editorW,consoleH)]; [self tuneScrollView:consoleScroll]; consoleScroll.wantsLayer = YES; consoleScroll.layer.backgroundColor = NSColor.blackColor.CGColor; self.console = [[NSTextView alloc] initWithFrame:consoleScroll.bounds]; self.console.font = MonoFont(19); self.console.textColor = NSColor.whiteColor; self.console.backgroundColor = NSColor.blackColor; self.console.editable = NO; self.console.verticallyResizable = YES; self.console.maxSize = NSMakeSize(FLT_MAX, FLT_MAX); consoleScroll.documentView = self.console; [self.dynamicViews addObject:consoleScroll]; [self.root addSubview:consoleScroll]; [self refreshConsole:nil];
+  }
+  [self placePreviewContent];
 }
 - (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)replacementString {
   if (textView != self.editor || ![replacementString isEqualToString:@"\n"]) return YES;
@@ -247,11 +316,37 @@ static void UpdateHistory(NSString *appName) {
   self.applyingHighlight = NO;
 }
 - (void)textDidChange:(NSNotification *)n { [self file][@"code"] = self.editor.string ?: @""; [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); [self saveStore]; [self applySyntaxHighlighting]; }
-- (void)saveEditor { [self file][@"code"] = self.editor.string ?: @""; [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); [self saveStore]; }
+- (void)saveEditor { if (!self.editor) return; [self file][@"code"] = self.editor.string ?: @""; [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); [self saveStore]; }
 - (void)back:(id)sender { [self saveEditor]; [self showMain]; }
 - (void)renameProjectInEditor:(id)sender { [self saveEditor]; [self renameProject:sender]; [self showProject]; }
 - (void)selectFile:(NSButton *)sender { [self saveEditor]; self.activeFileID = sender.identifier; [self project][@"activeFile"] = self.activeFileID; [self saveStore]; [self showProject]; }
 - (void)newFile:(id)sender { NSString *fid = [NSString stringWithFormat:@"File%lu", (unsigned long)self.fileIDs.count + 1]; [self project][@"files"][fid] = [@{@"name":fid, @"code":@"import SwiftUI\n"} mutableCopy]; self.activeFileID = fid; [self project][@"activeFile"] = fid; [self saveStore]; [self showProject]; }
+- (void)togglePreviewPane:(id)sender { self.previewPaneCollapsed = !self.previewPaneCollapsed; if (self.previewPaneCollapsed) self.previewPaneWide = NO; [self showProject]; [self placePreviewContent]; }
+- (void)widenPreviewPane:(id)sender { self.previewPaneCollapsed = NO; self.previewPaneWide = YES; [self showProject]; [self placePreviewContent]; }
+- (void)normalPreviewPane:(id)sender { self.previewPaneCollapsed = NO; self.previewPaneWide = NO; [self showProject]; [self placePreviewContent]; }
+- (void)collapsePreviewPane:(id)sender { self.previewPaneCollapsed = YES; self.previewPaneWide = NO; [self showProject]; [self placePreviewContent]; }
+- (void)clearPreviewSilently {
+  if (self.previewTask && self.previewTask.running) [self.previewTask terminate];
+  self.previewTask = nil;
+  @try {
+    NSTask *kill = [NSTask new];
+    kill.launchPath = @"/usr/bin/pkill";
+    kill.arguments = @[@"-f", @"SwiftStudioPreview"];
+    [kill launch];
+  } @catch (NSException *exception) {}
+  [self.previewContentView removeFromSuperview];
+  self.previewContentView = nil;
+  [self.previewWindow close];
+  self.previewWindow = nil;
+  if (self.previewLibraryHandle) dlclose(self.previewLibraryHandle);
+  self.previewLibraryHandle = nil;
+  self.openingPreview = NO;
+}
+- (void)stopPreview:(id)sender {
+  [self clearPreviewSilently];
+  [self appendConsole:@"Stopped preview"];
+  if (self.showingProject) [self showProject];
+}
 - (void)renameFile:(id)sender {
   [self saveEditor];
   if (!self.activeFileID.length) return;
@@ -278,20 +373,44 @@ static void UpdateHistory(NSString *appName) {
 - (NSString *)combinedSource {
   NSMutableString *source = [NSMutableString string]; for (NSString *fid in self.fileIDs) { [source appendFormat:@"\n// %@.swift\n%@\n", fid, [self project][@"files"][fid][@"code"] ?: @""]; } return source;
 }
+- (void)placePreviewContent {
+  if (!self.previewContentView) return;
+  BOOL inlinePreview = [self previewPaneVisible] && self.previewContainerView;
+  [self.previewContentView removeFromSuperview];
+  if (inlinePreview) {
+    [self.previewWindow orderOut:nil];
+    self.previewContentView.frame = self.previewContainerView.bounds;
+    self.previewContentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [self.previewContainerView addSubview:self.previewContentView];
+    return;
+  }
+  if (!self.previewWindow) {
+    self.previewWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(160,120,480,420) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
+    self.previewWindow.title = @"SwiftStudio Preview";
+    self.previewWindow.releasedWhenClosed = NO;
+    self.previewWindow.contentView = [[NSView alloc] initWithFrame:self.previewWindow.contentView.bounds];
+    self.previewWindow.contentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  }
+  NSView *host = self.previewWindow.contentView;
+  self.previewContentView.frame = host.bounds;
+  self.previewContentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  [host addSubview:self.previewContentView];
+  [self.previewWindow makeKeyAndOrderFront:nil];
+}
 - (BOOL)openPreviewWindowFromCompiledDocument:(NSDictionary *)doc errorText:(NSString **)errorText {
   NSString *requestID = doc[@"compiledRequestId"];
   NSNumber *chunkCountNumber = doc[@"compiledChunkCount"];
   if (self.pendingRequestID.length && ![requestID isEqualToString:self.pendingRequestID]) {
-    if (errorText) *errorText = @"Compiled executable did not match this send request.";
+    if (errorText) *errorText = @"Compiled preview did not match this send request.";
     return NO;
   }
   if (!requestID.length || !chunkCountNumber) {
-    if (errorText) *errorText = @"Runner did not send a compiled executable.";
+    if (errorText) *errorText = @"Runner did not send a compiled preview library.";
     return NO;
   }
   NSInteger chunkCount = chunkCountNumber.integerValue;
   if (chunkCount <= 0) {
-    if (errorText) *errorText = @"Compiled executable had no chunks.";
+    if (errorText) *errorText = @"Compiled preview library had no chunks.";
     return NO;
   }
   SetPercent(@"Run", 50);
@@ -311,7 +430,7 @@ static void UpdateHistory(NSString *appName) {
       @synchronized (chunks) {
         if (error && !downloadError) downloadError = error.localizedDescription;
         NSString *data = chunk[@"data"];
-        if (!error && !data.length && !downloadError) downloadError = [NSString stringWithFormat:@"Missing compiled executable chunk %ld.", (long)i];
+        if (!error && !data.length && !downloadError) downloadError = [NSString stringWithFormat:@"Missing compiled preview library chunk %ld.", (long)i];
         if (data.length) chunks[(NSUInteger)i] = data;
         completedChunks++;
         double downloadProgress = 45.0 + (((double)completedChunks) / MAX(1.0, (double)chunkCount)) * 20.0;
@@ -332,7 +451,7 @@ static void UpdateHistory(NSString *appName) {
   for (NSInteger i = 0; i < chunkCount; i++) {
     id chunk = chunks[(NSUInteger)i];
     if (![chunk isKindOfClass:[NSString class]]) {
-      if (errorText) *errorText = [NSString stringWithFormat:@"Missing compiled executable chunk %ld.", (long)i];
+      if (errorText) *errorText = [NSString stringWithFormat:@"Missing compiled preview library chunk %ld.", (long)i];
       return NO;
     }
     [base64 appendString:chunk];
@@ -363,28 +482,38 @@ static void UpdateHistory(NSString *appName) {
   __block BOOL launched = NO;
   __block NSString *launchError = nil;
   dispatch_semaphore_t launchedSem = dispatch_semaphore_create(0);
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+  dispatch_async(dispatch_get_main_queue(), ^{
     [NSApp activateIgnoringOtherApps:YES];
-    NSTask *run = [NSTask new];
-    run.launchPath = exe;
-    run.standardOutput = nil;
-    run.standardError = nil;
     @try {
       SetPercent(@"Run", 95);
       [self refreshConsole:nil];
-      [run launch];
-      self.previewTask = run;
+      [self clearPreviewSilently];
+      void *handle = dlopen(exe.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+      if (!handle) {
+        launchError = [NSString stringWithUTF8String:dlerror() ?: "Could not load preview library."];
+      } else {
+        void *symbol = dlsym(handle, "SwiftStudioCreatePreviewView");
+        if (!symbol) {
+          launchError = [NSString stringWithUTF8String:dlerror() ?: "Preview library did not contain a view factory."];
+        } else {
+          typedef void *(*Factory)(void);
+          void *rawView = ((Factory)symbol)();
+          self.previewContentView = (__bridge_transfer NSView *)rawView;
+          self.previewLibraryHandle = handle;
+          [self placePreviewContent];
+          launched = self.previewContentView != nil;
+        }
+      }
       [[NSRunningApplication currentApplication] activateWithOptions:NSApplicationActivateAllWindows];
-      launched = run.running;
       if (launched) SetPercent(@"Run", 100);
-      if (!launched) launchError = @"Preview executable started and exited immediately.";
+      if (!launched && !launchError) launchError = @"Preview view could not be created.";
     } @catch (NSException *exception) {
-      launchError = exception.reason ?: @"Preview executable launch failed.";
+      launchError = exception.reason ?: @"Preview library launch failed.";
     }
     dispatch_semaphore_signal(launchedSem);
   });
   dispatch_semaphore_wait(launchedSem, DISPATCH_TIME_FOREVER);
-  if (!launched && errorText) *errorText = launchError ?: @"Preview executable launch failed.";
+  if (!launched && errorText) *errorText = launchError ?: @"Preview library launch failed.";
   return launched;
 }
 - (NSString *)bar:(double)value { NSInteger fill = (NSInteger)round(MAX(0, MIN(100, value)) * 15.0 / 100.0); NSMutableString *s = [@"[" mutableCopy]; for (NSInteger i=0;i<fill;i++) [s appendString:@"="]; [s appendString:@">"]; for (NSInteger i=fill;i<15;i++) [s appendString:@" "]; [s appendString:@"]"]; return s; }

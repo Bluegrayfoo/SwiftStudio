@@ -144,18 +144,18 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-compile-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
   NSString *sourcePath = [dir stringByAppendingPathComponent:@"Preview.swift"];
-  NSString *exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@", requestID];
-  exeName = [[exeName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"-"];
+  NSString *safeID = [[requestID componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"-"];
+  NSString *exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@.dylib", safeID];
   NSString *exePath = [dir stringByAppendingPathComponent:exeName];
   NSString *cache = [@"~/cmds/.swiftstudio-module-cache" stringByExpandingTildeInPath];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
-  NSString *hosted = [NSString stringWithFormat:@"import AppKit\n%@\n\n@main\nstruct PreviewHostApp: App {\n    init() {\n        NSApplication.shared.activate(ignoringOtherApps: true)\n    }\n\n    var body: some Scene {\n        WindowGroup {\n            ContentView()\n        }\n    }\n}\n", StripPreviewBlocks(source)];
+  NSString *hosted = [NSString stringWithFormat:@"import SwiftUI\nimport AppKit\n%@\n\n@_cdecl(\"SwiftStudioCreatePreviewView\")\npublic func SwiftStudioCreatePreviewView() -> UnsafeMutableRawPointer {\n    let view = NSHostingView(rootView: ContentView())\n    view.wantsLayer = true\n    view.layer?.backgroundColor = NSColor.black.cgColor\n    return Unmanaged.passRetained(view).toOpaque()\n}\n", StripPreviewBlocks(source)];
   [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   SetPercent(@"Compile", 22);
   NSTask *compile = [NSTask new];
   compile.launchPath = @"/usr/bin/swiftc";
-  compile.arguments = @[@"-parse-as-library", @"-module-cache-path", cache, sourcePath, @"-o", exePath];
+  compile.arguments = @[@"-emit-library", @"-parse-as-library", @"-module-cache-path", cache, sourcePath, @"-o", exePath];
   NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
   env[@"CLANG_MODULE_CACHE_PATH"] = cache;
   compile.environment = env;
@@ -184,7 +184,7 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
   if (compile.terminationStatus != 0) {
     return @{@"ok": @NO, @"preview": compilerOut.length ? compilerOut : @"SwiftUI compile failed.", @"error": compilerErr};
   }
-  return @{@"ok": @YES, @"preview": @"Compiled executable for Studio", @"error": @"", @"executablePath": exePath, @"executableName": exeName};
+  return @{@"ok": @YES, @"preview": @"Compiled preview library for Studio", @"error": @"", @"executablePath": exePath, @"executableName": exeName};
 }
 
 static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestID, NSString *exePath, NSString *exeName, NSError **outError) {
@@ -242,6 +242,7 @@ int main(int argc, const char *argv[]) {
         if (!requestID.length || !source.length || [seen[thread] isEqualToString:requestID]) continue;
         seen[thread] = requestID;
         NSString *appName = remote[@"appName"] ?: @"SwiftUI App";
+        SetPercent(@"Compile", 1);
         SetPercent(@"Run", 0);
         PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": @"running", @"startedAt": NSDate.date}, nil);
         NSDictionary *result = CompileExecutable(source, requestID);
@@ -251,7 +252,7 @@ int main(int argc, const char *argv[]) {
           NSError *uploadError = nil;
           compiledMetadata = UploadExecutableChunks(thread, requestID, result[@"executablePath"], result[@"executableName"], &uploadError);
           ok = compiledMetadata != nil;
-          if (!ok) result = @{@"ok": @NO, @"preview": @"Compiled executable upload failed.", @"error": uploadError.localizedDescription ?: @""};
+          if (!ok) result = @{@"ok": @NO, @"preview": @"Compiled preview library upload failed.", @"error": uploadError.localizedDescription ?: @""};
         }
         NSMutableDictionary *finalPayload = [@{@"status": ok ? @"complete" : @"error", @"preview": result[@"preview"] ?: @"", @"error": result[@"error"] ?: @"", @"completedAt": NSDate.date} mutableCopy];
         [finalPayload addEntriesFromDictionary:compiledMetadata];

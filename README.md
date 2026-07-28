@@ -2,8 +2,8 @@
 
 SwiftStudio contains native macOS terminal-runnable GUI apps:
 
-- `code_studio`: a SwiftUI project/file editor that sends raw source through Firestore, downloads the compiled executable returned by the runner, and opens that executable locally.
-- `preview_runner`: companion source is included for the runner side. It silently compiles SwiftUI into an executable, uploads that executable through Firestore chunks, and reports status back; it does not open the preview window.
+- `code_studio`: a SwiftUI project/file editor that sends raw source through Firestore, downloads the compiled preview library returned by the runner, and hosts the preview locally.
+- `preview_runner`: companion source is included for the runner side. It silently compiles SwiftUI into a loadable preview library, uploads that library through Firestore chunks, and reports status back; it does not open the preview window.
 
 The repository is configured for the GitHub repo:
 
@@ -59,6 +59,11 @@ Open the studio:
   - strings: red
 - Project file renaming from the project screen.
 - Tuned scrolling for the editor and bottom console.
+- Collapsible fullscreen inline preview pane from the small bottom-left preview button.
+- Fullscreen automatically expands the Studio layout and opens the inline preview pane.
+- Normal fullscreen preview can expand wider with `|<`.
+- Wide preview has a side bar with `>|>` to return to normal width and `>|` to collapse.
+- Red `Stop` button stops hosted previews and older running preview processes started by Studio.
 
 Install without automatically opening the window:
 
@@ -78,24 +83,23 @@ SwiftStudio uses the Firebase project embedded in the source.
 - `Threads/<thread>/Compiled/<requestId>-0000...`
 - `LatestHistory/History.hist`
 
-`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, adds a SwiftUI host around `ContentView`, uploads the compiled executable as base64 chunks, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio downloads the compiled executable, writes it to a uniquely named local temp executable for that request, and opens the preview window on the Studio computer from Studio's main thread.
+`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, wraps `ContentView` in an exported `NSHostingView` factory, uploads the compiled preview library as base64 chunks, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio downloads the compiled library, writes it to a uniquely named local temp library for that request, loads it, and hosts the returned preview view locally.
 
-The generated preview host activates itself on launch, and Studio retains the preview task so the process lifecycle is not lost immediately after launch.
+The preview is inline only while Studio is fullscreen and the preview pane is expanded. Outside fullscreen, or when the fullscreen pane is collapsed, Studio moves the same hosted preview into a separate Studio-owned preview window. Studio continually rechecks placement so an already-loaded preview follows fullscreen, split-screen, resize, and collapse changes.
 
 `Percent/Run.%` represents the post-compile workflow:
 
 ```text
-Runner uploads executable chunks
+Runner uploads preview library chunks
 Studio downloads all chunks
 Studio base64-decodes them
-Studio writes the executable to disk
-Studio chmods it executable
-Studio launches it with NSTask
-SwiftUI runtime starts
-Window appears
+Studio writes the preview library to disk
+Studio loads the library
+Studio creates the SwiftUI hosting view
+Studio places it inline in fullscreen or in a separate window otherwise
 ```
 
-Studio downloads executable chunks concurrently, and the runner uses larger chunk documents to reduce request count. Studio and runner also use shorter polling intervals so completed work is noticed faster.
+Studio downloads preview library chunks concurrently, and the runner uses larger chunk documents to reduce request count. Studio and runner also use shorter polling intervals so completed work is noticed faster.
 
 ## Requirements
 
