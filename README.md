@@ -47,6 +47,19 @@ Open the studio:
 ~/cmds/code_studio --thread Thread1
 ```
 
+## Editor Features
+
+- Automatic indentation on new lines.
+- Syntax highlighting:
+  - keywords: pink
+  - types and built-in SwiftUI views: blue
+  - declaration names: cyan
+  - variables and custom `View` declarations: green
+  - comments: green
+  - strings: red
+- Project file renaming from the project screen.
+- Tuned scrolling for the editor and bottom console.
+
 Install without automatically opening the window:
 
 ```bash

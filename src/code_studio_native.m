@@ -105,6 +105,7 @@ static void UpdateHistory(NSString *appName) {
 @property double lastCompilePercent;
 @property double lastRunPercent;
 @property NSTask *previewTask;
+@property BOOL applyingHighlight;
 @end
 
 @implementation StudioDelegate
@@ -137,6 +138,13 @@ static void UpdateHistory(NSString *appName) {
 }
 - (NSButton *)button:(NSString *)title frame:(NSRect)frame action:(SEL)action blue:(BOOL)blue {
   NSButton *b = [[NSButton alloc] initWithFrame:frame]; b.title = title; b.font = TitleFont(frame.size.height * 0.55); b.bezelStyle = NSBezelStyleRegularSquare; b.bordered = NO; b.target = self; b.action = action; b.wantsLayer = YES; b.layer.cornerRadius = frame.size.height/2; b.layer.backgroundColor = (blue ? Blue() : NSColor.clearColor).CGColor; [b setContentTintColor:NSColor.whiteColor]; [self.dynamicViews addObject:b]; [self.root addSubview:b]; return b;
+}
+- (void)tuneScrollView:(NSScrollView *)scrollView {
+  scrollView.hasVerticalScroller = YES;
+  scrollView.autohidesScrollers = NO;
+  scrollView.verticalLineScroll = 10;
+  scrollView.verticalPageScroll = 80;
+  scrollView.scrollerStyle = NSScrollerStyleOverlay;
 }
 - (void)clearDynamic { for (NSView *v in self.dynamicViews) [v removeFromSuperview]; [self.dynamicViews removeAllObjects]; }
 - (void)addLine:(NSRect)frame { NSBox *box = [[NSBox alloc] initWithFrame:frame]; box.boxType = NSBoxCustom; box.borderColor = NSColor.whiteColor; box.fillColor = NSColor.whiteColor; [self.dynamicViews addObject:box]; [self.root addSubview:box]; }
@@ -187,19 +195,86 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)showProject {
   self.showingProject = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; NSDictionary *p = [self project]; if (!self.activeFileID) self.activeFileID = p[@"activeFile"] ?: self.fileIDs.firstObject;
-  [self button:@"<" frame:NSMakeRect(18,700,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,680,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,690,190,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Rename" frame:NSMakeRect(448,690,130,44) action:@selector(renameProjectInEditor:) blue:YES]; [self addLine:NSMakeRect(0,674,1176,2)]; [self addLine:NSMakeRect(244,0,2,674)]; [self addLine:NSMakeRect(246,155,930,2)];
+  [self button:@"<" frame:NSMakeRect(18,700,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,680,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,690,190,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Rename" frame:NSMakeRect(448,690,130,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(590,690,170,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,674,1176,2)]; [self addLine:NSMakeRect(244,0,2,674)]; [self addLine:NSMakeRect(246,155,930,2)];
   CGFloat y = 625; for (NSString *fid in self.fileIDs) { NSDictionary *f = [self project][@"files"][fid]; if (self.swiftLogo) { NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,y-1,32,28)]; iv.image = self.swiftLogo; [self.dynamicViews addObject:iv]; [self.root addSubview:iv]; } [self label:f[@"name"] frame:NSMakeRect(54,y,175,27) font:MonoFont(21) color:NSColor.whiteColor]; NSButton *hit = [self button:@"" frame:NSMakeRect(0,y-4,240,34) action:@selector(selectFile:) blue:NO]; hit.identifier = fid; hit.layer.backgroundColor = ([fid isEqualToString:self.activeFileID] ? Blue() : NSColor.clearColor).CGColor; hit.layer.opacity = [fid isEqualToString:self.activeFileID] ? 0.35 : 0.0; y -= 36; }
   [self button:@"+" frame:NSMakeRect(18,18,32,32) action:@selector(newFile:) blue:YES];
-  NSScrollView *editScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(264,165,890,490)]; editScroll.borderType = NSNoBorder; editScroll.hasVerticalScroller = YES; editScroll.wantsLayer = YES; editScroll.layer.backgroundColor = NSColor.blackColor.CGColor;
-  self.editor = [[NSTextView alloc] initWithFrame:editScroll.bounds]; self.editor.font = MonoFont(19); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.automaticQuoteSubstitutionEnabled = NO; self.editor.delegate = self; self.editor.string = [self file][@"code"] ?: @""; editScroll.documentView = self.editor; [self.dynamicViews addObject:editScroll]; [self.root addSubview:editScroll];
-  NSScrollView *consoleScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(264,16,890,126)]; consoleScroll.hasVerticalScroller = YES; consoleScroll.autohidesScrollers = NO; consoleScroll.wantsLayer = YES; consoleScroll.layer.backgroundColor = NSColor.blackColor.CGColor; self.console = [[NSTextView alloc] initWithFrame:consoleScroll.bounds]; self.console.font = MonoFont(19); self.console.textColor = NSColor.whiteColor; self.console.backgroundColor = NSColor.blackColor; self.console.editable = NO; self.console.verticallyResizable = YES; self.console.maxSize = NSMakeSize(FLT_MAX, FLT_MAX); consoleScroll.documentView = self.console; [self.dynamicViews addObject:consoleScroll]; [self.root addSubview:consoleScroll]; [self refreshConsole:nil];
+  NSScrollView *editScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(264,165,890,490)]; editScroll.borderType = NSNoBorder; [self tuneScrollView:editScroll]; editScroll.wantsLayer = YES; editScroll.layer.backgroundColor = NSColor.blackColor.CGColor;
+  self.editor = [[NSTextView alloc] initWithFrame:editScroll.bounds]; self.editor.font = MonoFont(19); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.automaticQuoteSubstitutionEnabled = NO; self.editor.automaticDashSubstitutionEnabled = NO; self.editor.automaticTextReplacementEnabled = NO; self.editor.allowsUndo = YES; self.editor.delegate = self; self.editor.string = [self file][@"code"] ?: @""; editScroll.documentView = self.editor; [self.dynamicViews addObject:editScroll]; [self.root addSubview:editScroll]; [self applySyntaxHighlighting];
+  NSScrollView *consoleScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(264,16,890,126)]; [self tuneScrollView:consoleScroll]; consoleScroll.wantsLayer = YES; consoleScroll.layer.backgroundColor = NSColor.blackColor.CGColor; self.console = [[NSTextView alloc] initWithFrame:consoleScroll.bounds]; self.console.font = MonoFont(19); self.console.textColor = NSColor.whiteColor; self.console.backgroundColor = NSColor.blackColor; self.console.editable = NO; self.console.verticallyResizable = YES; self.console.maxSize = NSMakeSize(FLT_MAX, FLT_MAX); consoleScroll.documentView = self.console; [self.dynamicViews addObject:consoleScroll]; [self.root addSubview:consoleScroll]; [self refreshConsole:nil];
 }
-- (void)textDidChange:(NSNotification *)n { [self file][@"code"] = self.editor.string ?: @""; [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); [self saveStore]; }
+- (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)replacementString {
+  if (textView != self.editor || ![replacementString isEqualToString:@"\n"]) return YES;
+  NSString *text = textView.string ?: @"";
+  NSRange lineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
+  NSString *line = [text substringWithRange:NSMakeRange(lineRange.location, MIN(lineRange.length, text.length - lineRange.location))];
+  NSMutableString *indent = [NSMutableString string];
+  for (NSUInteger i = 0; i < line.length; i++) {
+    unichar c = [line characterAtIndex:i];
+    if (c == ' ' || c == '\t') [indent appendFormat:@"%C", c]; else break;
+  }
+  if (range.location > 0 && [[text substringWithRange:NSMakeRange(range.location - 1, 1)] isEqualToString:@"{"]) [indent appendString:@"    "];
+  NSString *insert = [@"\n" stringByAppendingString:indent];
+  [textView insertText:insert replacementRange:range];
+  return NO;
+}
+- (void)colorPattern:(NSString *)pattern color:(NSColor *)color inString:(NSString *)text {
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  [regex enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    if (result.range.location != NSNotFound) [self.editor.textStorage addAttribute:NSForegroundColorAttributeName value:color range:result.range];
+  }];
+}
+- (void)applySyntaxHighlighting {
+  if (!self.editor || self.applyingHighlight) return;
+  self.applyingHighlight = YES;
+  NSRange selected = self.editor.selectedRange;
+  NSString *text = self.editor.string ?: @"";
+  NSDictionary *base = @{NSForegroundColorAttributeName: NSColor.whiteColor, NSFontAttributeName: MonoFont(19)};
+  [self.editor.textStorage setAttributes:base range:NSMakeRange(0, text.length)];
+  NSColor *pink = [NSColor colorWithCalibratedRed:1.0 green:0.24 blue:0.72 alpha:1.0];
+  NSColor *blue = [NSColor colorWithCalibratedRed:0.28 green:0.62 blue:1.0 alpha:1.0];
+  NSColor *cyan = [NSColor colorWithCalibratedRed:0.15 green:0.95 blue:1.0 alpha:1.0];
+  NSColor *green = [NSColor colorWithCalibratedRed:0.35 green:1.0 blue:0.45 alpha:1.0];
+  NSColor *red = [NSColor colorWithCalibratedRed:1.0 green:0.25 blue:0.25 alpha:1.0];
+  [self colorPattern:@"\\b(import|struct|class|enum|protocol|extension|func|var|let|if|else|for|while|return|switch|case|default|private|public|internal|static|@main|some|in|where)\\b" color:pink inString:text];
+  [self colorPattern:@"\\b(Int|Double|Float|String|Bool|Void|View|Scene|App|Color|Image|Font|Binding|State|ObservedObject|EnvironmentObject|CGFloat|NSApplication)\\b" color:blue inString:text];
+  [self colorPattern:@"\\b(Text|VStack|HStack|ZStack|List|Button|Image|Spacer|ScrollView|NavigationStack|Form|Section|Toggle|Slider|TextField|Rectangle|RoundedRectangle|Circle|ForEach)\\b" color:blue inString:text];
+  [self colorPattern:@"\\b(struct|class|enum|protocol|func)\\s+([A-Za-z_][A-Za-z0-9_]*)" color:cyan inString:text];
+  [self colorPattern:@"\\b(var|let)\\s+([A-Za-z_][A-Za-z0-9_]*)" color:green inString:text];
+  [self colorPattern:@"\\bstruct\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*:\\s*View\\b" color:green inString:text];
+  [self colorPattern:@"\"([^\"\\\\]|\\\\.)*\"" color:red inString:text];
+  [self colorPattern:@"//[^\\n]*" color:green inString:text];
+  [self.editor setSelectedRange:NSMakeRange(MIN(selected.location, text.length), MIN(selected.length, text.length - MIN(selected.location, text.length)))];
+  self.applyingHighlight = NO;
+}
+- (void)textDidChange:(NSNotification *)n { [self file][@"code"] = self.editor.string ?: @""; [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); [self saveStore]; [self applySyntaxHighlighting]; }
 - (void)saveEditor { [self file][@"code"] = self.editor.string ?: @""; [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); [self saveStore]; }
 - (void)back:(id)sender { [self saveEditor]; [self showMain]; }
 - (void)renameProjectInEditor:(id)sender { [self saveEditor]; [self renameProject:sender]; [self showProject]; }
 - (void)selectFile:(NSButton *)sender { [self saveEditor]; self.activeFileID = sender.identifier; [self project][@"activeFile"] = self.activeFileID; [self saveStore]; [self showProject]; }
 - (void)newFile:(id)sender { NSString *fid = [NSString stringWithFormat:@"File%lu", (unsigned long)self.fileIDs.count + 1]; [self project][@"files"][fid] = [@{@"name":fid, @"code":@"import SwiftUI\n"} mutableCopy]; self.activeFileID = fid; [self project][@"activeFile"] = fid; [self saveStore]; [self showProject]; }
+- (void)renameFile:(id)sender {
+  [self saveEditor];
+  if (!self.activeFileID.length) return;
+  NSAlert *alert = [NSAlert new]; alert.messageText = @"Rename file";
+  NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0,0,260,28)];
+  input.stringValue = [self file][@"name"] ?: self.activeFileID;
+  alert.accessoryView = input; [alert addButtonWithTitle:@"Rename"]; [alert addButtonWithTitle:@"Cancel"];
+  if ([alert runModal] != NSAlertFirstButtonReturn || !input.stringValue.length) return;
+  NSString *base = [[input.stringValue componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@""];
+  if (!base.length) base = @"File";
+  NSString *newID = base;
+  NSUInteger suffix = 2;
+  NSMutableDictionary *files = [self project][@"files"];
+  while (files[newID] && ![newID isEqualToString:self.activeFileID]) newID = [NSString stringWithFormat:@"%@%lu", base, (unsigned long)suffix++];
+  NSMutableDictionary *renamed = [[self file] mutableCopy];
+  renamed[@"name"] = input.stringValue;
+  [files removeObjectForKey:self.activeFileID];
+  files[newID] = renamed;
+  self.activeFileID = newID;
+  [self project][@"activeFile"] = newID;
+  [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
+  [self saveStore]; [self showProject];
+}
 - (NSString *)combinedSource {
   NSMutableString *source = [NSMutableString string]; for (NSString *fid in self.fileIDs) { [source appendFormat:@"\n// %@.swift\n%@\n", fid, [self project][@"files"][fid][@"code"] ?: @""]; } return source;
 }
