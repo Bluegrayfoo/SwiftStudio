@@ -101,6 +101,8 @@ static void UpdateHistory(NSString *appName) {
 @property NSImage *swiftLogo;
 @property BOOL showingProject;
 @property BOOL openingPreview;
+@property double lastSendPercent;
+@property double lastCompilePercent;
 @end
 
 @implementation StudioDelegate
@@ -239,7 +241,10 @@ static void UpdateHistory(NSString *appName) {
   }
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-preview-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-  NSString *exe = [dir stringByAppendingPathComponent:@"PreviewApp"];
+  NSString *exeName = doc[@"compiledExecutableName"];
+  if (!exeName.length) exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@", requestID];
+  exeName = [[exeName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"-"];
+  NSString *exe = [dir stringByAppendingPathComponent:exeName];
   NSError *writeError = nil;
   if (![exeData writeToFile:exe options:NSDataWritingAtomic error:&writeError]) {
     if (errorText) *errorText = writeError.localizedDescription;
@@ -255,13 +260,17 @@ static void UpdateHistory(NSString *appName) {
   if (!self.console) return;
   if (!self.pendingRequestID) { self.console.string = self.consoleLog ?: @""; [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)]; return; }
   double send = [GetDocument(@"Percent/Send", nil)[@"%"] doubleValue]; double compile = [GetDocument(@"Percent/Compile", nil)[@"%"] doubleValue];
+  self.lastSendPercent = MAX(self.lastSendPercent, send);
+  self.lastCompilePercent = MAX(self.lastCompilePercent, compile);
+  send = self.lastSendPercent;
+  compile = self.lastCompilePercent;
   NSMutableString *text = [NSMutableString stringWithFormat:@"Sending...%@ %.0f%%\nCompiling...%@ %.0f%%\n", [self bar:send], send, [self bar:compile], compile];
   [text appendString:self.consoleLog ?: @""];
   self.console.string = text;
   [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)];
 }
 - (void)sendForPreview:(id)sender {
-  [self saveEditor]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); [self refreshConsole:nil];
+  [self saveEditor]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 0; self.lastCompilePercent = 0; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); [self refreshConsole:nil];
   NSDictionary *p = [self project]; NSError *error = nil;
   SetPercent(@"Send", 35);
   NSString *source = [self combinedSource];
@@ -296,6 +305,8 @@ static void UpdateHistory(NSString *appName) {
           if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]];
           self.pendingRequestID = nil;
           self.openingPreview = NO;
+          self.lastSendPercent = 0;
+          self.lastCompilePercent = 0;
           [self refreshConsole:nil];
         });
       });
@@ -303,7 +314,7 @@ static void UpdateHistory(NSString *appName) {
     } else {
       if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
     }
-    if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
+    if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; self.lastSendPercent = 0; self.lastCompilePercent = 0; [self refreshConsole:nil]; return; }
   [NSTimer scheduledTimerWithTimeInterval:1.2 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 @end

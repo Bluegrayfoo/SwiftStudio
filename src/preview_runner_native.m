@@ -139,12 +139,14 @@ static NSString *StripPreviewBlocks(NSString *source) {
   return out;
 }
 
-static NSDictionary *CompileExecutable(NSString *source) {
+static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
   SetPercent(@"Compile", 3);
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-compile-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
   NSString *sourcePath = [dir stringByAppendingPathComponent:@"Preview.swift"];
-  NSString *exePath = [dir stringByAppendingPathComponent:@"PreviewApp"];
+  NSString *exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@", requestID];
+  exeName = [[exeName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"-"];
+  NSString *exePath = [dir stringByAppendingPathComponent:exeName];
   NSString *cache = [dir stringByAppendingPathComponent:@"module-cache"];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
@@ -182,10 +184,10 @@ static NSDictionary *CompileExecutable(NSString *source) {
   if (compile.terminationStatus != 0) {
     return @{@"ok": @NO, @"preview": compilerOut.length ? compilerOut : @"SwiftUI compile failed.", @"error": compilerErr};
   }
-  return @{@"ok": @YES, @"preview": @"Compiled executable for Studio", @"error": @"", @"executablePath": exePath};
+  return @{@"ok": @YES, @"preview": @"Compiled executable for Studio", @"error": @"", @"executablePath": exePath, @"executableName": exeName};
 }
 
-static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestID, NSString *exePath, NSError **outError) {
+static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestID, NSString *exePath, NSString *exeName, NSError **outError) {
   NSData *data = [NSData dataWithContentsOfFile:exePath options:0 error:outError];
   if (!data) return nil;
   NSString *base64 = [data base64EncodedStringWithOptions:0];
@@ -203,6 +205,7 @@ static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestI
     @"compiledRequestId": requestID,
     @"compiledChunkCount": @(count),
     @"compiledSize": @(data.length),
+    @"compiledExecutableName": exeName ?: [NSString stringWithFormat:@"SwiftStudioPreview-%@", requestID],
     @"compiledAt": NSDate.date
   };
 }
@@ -237,12 +240,12 @@ int main(int argc, const char *argv[]) {
         seen[thread] = requestID;
         NSString *appName = remote[@"appName"] ?: @"SwiftUI App";
         PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": @"running", @"startedAt": NSDate.date}, nil);
-        NSDictionary *result = CompileExecutable(source);
+        NSDictionary *result = CompileExecutable(source, requestID);
         BOOL ok = [result[@"ok"] boolValue];
         NSDictionary *compiledMetadata = @{};
         if (ok) {
           NSError *uploadError = nil;
-          compiledMetadata = UploadExecutableChunks(thread, requestID, result[@"executablePath"], &uploadError);
+          compiledMetadata = UploadExecutableChunks(thread, requestID, result[@"executablePath"], result[@"executableName"], &uploadError);
           ok = compiledMetadata != nil;
           if (!ok) result = @{@"ok": @NO, @"preview": @"Compiled executable upload failed.", @"error": uploadError.localizedDescription ?: @""};
         }
