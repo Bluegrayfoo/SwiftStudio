@@ -78,6 +78,16 @@ static BOOL PatchDocument(NSString *path, NSDictionary *payload, NSError **outEr
 
 static void SetPercent(NSString *kind, double value) { PatchDocument([NSString stringWithFormat:@"Percent/%@", kind], @{@"%": @(value)}, nil); }
 
+static NSString *ProcessArch(void) {
+#if defined(__x86_64__)
+  return @"x86_64";
+#elif defined(__arm64__)
+  return @"arm64";
+#else
+  return @"native";
+#endif
+}
+
 static void UpdateHistory(NSString *appName) {
   NSDictionary *doc = GetDocument(@"LatestHistory/History", nil); NSMutableDictionary *hist = [NSMutableDictionary dictionaryWithDictionary:doc[@"hist"] ?: @{}]; NSDate *now = NSDate.date; NSDate *cutoff = [now dateByAddingTimeInterval:-7*24*60*60];
   NSDateFormatter *iso = [NSDateFormatter new]; iso.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]; iso.dateFormat = @"yyyy-MM-dd'T'HH:mm:ssZZZZZ";
@@ -603,7 +613,7 @@ static void UpdateHistory(NSString *appName) {
   SetPercent(@"Send", 35);
   NSString *source = [self combinedSource];
   SetPercent(@"Send", 70);
-  BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date, @"compiledRequestId":@"", @"compiledChunkCount":@0, @"compiledSize":@0}, &error);
+  BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"previewArch":ProcessArch(), @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date, @"compiledRequestId":@"", @"compiledChunkCount":@0, @"compiledSize":@0}, &error);
   SetPercent(@"Send", ok ? 100 : 0); [self refreshConsole:nil]; if (!ok) { [self appendConsole:[NSString stringWithFormat:@"Send failed: %@", error.localizedDescription]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
   [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }

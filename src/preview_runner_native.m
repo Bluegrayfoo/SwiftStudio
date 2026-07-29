@@ -139,7 +139,7 @@ static NSString *StripPreviewBlocks(NSString *source) {
   return out;
 }
 
-static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
+static NSDictionary *CompileExecutable(NSString *source, NSString *requestID, NSString *previewArch) {
   SetPercent(@"Compile", 3);
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-compile-%@", NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -147,7 +147,8 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
   NSString *safeID = [[requestID componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"-"];
   NSString *exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@.dylib", safeID];
   NSString *exePath = [dir stringByAppendingPathComponent:exeName];
-  NSString *cache = [@"~/cmds/.swiftstudio-module-cache" stringByExpandingTildeInPath];
+  if (![previewArch isEqualToString:@"x86_64"] && ![previewArch isEqualToString:@"arm64"]) previewArch = @"arm64";
+  NSString *cache = [[@"~/cmds/.swiftstudio-module-cache" stringByExpandingTildeInPath] stringByAppendingPathComponent:previewArch];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
   NSString *hosted = [NSString stringWithFormat:@"import SwiftUI\nimport AppKit\n%@\n\n@_cdecl(\"SwiftStudioCreatePreviewView\")\npublic func SwiftStudioCreatePreviewView() -> UnsafeMutableRawPointer {\n    let view = NSHostingView(rootView: ContentView())\n    view.wantsLayer = true\n    view.layer?.backgroundColor = NSColor.black.cgColor\n    return Unmanaged.passRetained(view).toOpaque()\n}\n", StripPreviewBlocks(source)];
@@ -155,7 +156,8 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID) {
   SetPercent(@"Compile", 22);
   NSTask *compile = [NSTask new];
   compile.launchPath = @"/usr/bin/swiftc";
-  compile.arguments = @[@"-emit-library", @"-parse-as-library", @"-module-cache-path", cache, sourcePath, @"-o", exePath];
+  NSString *target = [previewArch isEqualToString:@"x86_64"] ? @"x86_64-apple-macos13.0" : @"arm64-apple-macos13.0";
+  compile.arguments = @[@"-emit-library", @"-parse-as-library", @"-target", target, @"-module-cache-path", cache, sourcePath, @"-o", exePath];
   NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
   env[@"CLANG_MODULE_CACHE_PATH"] = cache;
   compile.environment = env;
@@ -245,7 +247,7 @@ int main(int argc, const char *argv[]) {
         SetPercent(@"Compile", 1);
         SetPercent(@"Run", 0);
         PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": @"running", @"startedAt": NSDate.date}, nil);
-        NSDictionary *result = CompileExecutable(source, requestID);
+        NSDictionary *result = CompileExecutable(source, requestID, remote[@"previewArch"] ?: @"arm64");
         BOOL ok = [result[@"ok"] boolValue];
         NSDictionary *compiledMetadata = @{};
         if (ok) {
