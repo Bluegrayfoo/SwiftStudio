@@ -3,6 +3,7 @@ set -euo pipefail
 
 INSTALL_DIR="${SWIFTSTUDIO_INSTALL_DIR:-$HOME/cmds}"
 REPO_RAW="${SWIFTSTUDIO_REPO_RAW:-https://raw.githubusercontent.com/Bluegrayfoo/SwiftStudio/main}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -12,9 +13,15 @@ trap cleanup EXIT
 
 mkdir -p "$WORK_DIR/src" "$WORK_DIR/assets" "$INSTALL_DIR"
 
-curl -fsSL "$REPO_RAW/src/code_studio_native.m" -o "$WORK_DIR/src/code_studio_native.m"
-curl -fsSL "$REPO_RAW/assets/swiftlogo.png" -o "$WORK_DIR/assets/swiftlogo.png"
-curl -fsSL "$REPO_RAW/README.md" -o "$WORK_DIR/README.md"
+if [[ -f "$SCRIPT_DIR/src/code_studio_native.m" ]]; then
+  cp "$SCRIPT_DIR/src/code_studio_native.m" "$WORK_DIR/src/code_studio_native.m"
+  cp "$SCRIPT_DIR/assets/swiftlogo.png" "$WORK_DIR/assets/swiftlogo.png"
+  cp "$SCRIPT_DIR/README.md" "$WORK_DIR/README.md"
+else
+  curl -fsSL "$REPO_RAW/src/code_studio_native.m" -o "$WORK_DIR/src/code_studio_native.m"
+  curl -fsSL "$REPO_RAW/assets/swiftlogo.png" -o "$WORK_DIR/assets/swiftlogo.png"
+  curl -fsSL "$REPO_RAW/README.md" -o "$WORK_DIR/README.md"
+fi
 
 SOURCE="$WORK_DIR/src/code_studio_native.m"
 LOGO="$WORK_DIR/assets/swiftlogo.png"

@@ -302,6 +302,9 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
 @property NSMutableDictionary *editingProject;
 @property BOOL editingSharedProject;
 @property NSTextView *editor;
+@property NSMutableDictionary<NSString *, NSButton *> *projectRows;
+@property BOOL applyingHighlight;
+@property NSImage *swiftLogo;
 @end
 
 @implementation RunnerDelegate
@@ -311,6 +314,8 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   self.dynamicViews = [NSMutableArray array];
   self.logText = [NSMutableString string];
   self.seen = [NSMutableDictionary dictionary];
+  self.projectRows = [NSMutableDictionary dictionary];
+  self.swiftLogo = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/swiftlogo.png" stringByExpandingTildeInPath]];
   [self buildWindow];
   [self showLog];
   UpdateHistory(@"Preview Runner");
@@ -337,6 +342,7 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   NSButton *b = [[NSButton alloc] initWithFrame:frame]; b.title = title; b.font = TitleFont(frame.size.height * 0.48); b.bezelStyle = NSBezelStyleRegularSquare; b.bordered = NO; b.target = self; b.action = action; b.wantsLayer = YES; b.layer.cornerRadius = frame.size.height / 2; b.layer.backgroundColor = (blue ? Blue() : DarkRow()).CGColor; [b setContentTintColor:NSColor.whiteColor]; [self.dynamicViews addObject:b]; [self.root addSubview:b]; return b;
 }
 - (void)addLine:(NSRect)frame { NSBox *box = [[NSBox alloc] initWithFrame:frame]; box.boxType = NSBoxCustom; box.borderColor = NSColor.whiteColor; box.fillColor = NSColor.whiteColor; [self.dynamicViews addObject:box]; [self.root addSubview:box]; }
+- (void)tuneScrollView:(NSScrollView *)scrollView { scrollView.hasVerticalScroller = YES; scrollView.autohidesScrollers = NO; scrollView.verticalLineScroll = 10; scrollView.verticalPageScroll = 80; scrollView.scrollerStyle = NSScrollerStyleOverlay; }
 - (void)appendLog:(NSString *)line {
   dispatch_async(dispatch_get_main_queue(), ^{
     if (!self.logText) self.logText = [NSMutableString string];
@@ -371,29 +377,35 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   NSData *data = [NSData dataWithContentsOfFile:self.docsPath];
   if (data) self.store = [[NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingMutableContainers error:nil] mutableCopy];
   if (!self.store) self.store = [@{@"activeProject":@"", @"projects":[NSMutableDictionary dictionary]} mutableCopy];
+  if (![self.store[@"projects"] count]) {
+    self.store[@"projects"][@"myapp"] = [@{@"name":@"MyApp", @"updatedAt":@(NSDate.date.timeIntervalSince1970), @"activeFile":@"ContentView", @"files":[@{@"ContentView":[@{@"name":@"ContentView", @"code":@"import SwiftUI\n\nstruct ContentView: View {\n    var body: some View {\n        Text(\"Hello\")\n    }\n}\n\n#Preview {\n    ContentView()\n}\n"} mutableCopy]} mutableCopy]} mutableCopy];
+    self.store[@"activeProject"] = @"myapp";
+  }
   self.activeProjectID = self.store[@"activeProject"] ?: [[self.store[@"projects"] allKeys] firstObject];
 }
 - (void)saveStore { NSData *data = [NSJSONSerialization dataWithJSONObject:self.store options:NSJSONWritingPrettyPrinted error:nil]; [data writeToFile:self.docsPath atomically:YES]; }
 - (NSArray *)projectIDs { return [[self.store[@"projects"] allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]; }
 - (NSArray *)fileIDsForProject:(NSDictionary *)project { return [[project[@"files"] allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]; }
 - (NSMutableDictionary *)activeLocalProject { return self.store[@"projects"][self.activeProjectID]; }
+- (NSMutableDictionary *)currentFile { return self.editingProject[@"files"][self.activeFileID]; }
 - (void)enterStudio:(id)sender { [self loadStore]; [self showProjectsPage]; }
 - (void)showProjectsPage {
-  [self clearDynamic]; self.editor = nil; NSRect b = self.root.bounds;
-  [self button:@"Back to log" frame:NSMakeRect(18,b.size.height-62,150,42) action:@selector(backToLog:) blue:YES];
-  [self label:@"SwiftStudio" frame:NSMakeRect(0,b.size.height-78,b.size.width,60) font:TitleFont(42) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter;
-  [self addLine:NSMakeRect(0,b.size.height-86,b.size.width,2)];
-  CGFloat y = b.size.height - 160;
+  [self clearDynamic]; [self.projectRows removeAllObjects]; self.editor = nil; self.editingProject = nil; NSRect b = self.root.bounds;
+  [self label:@"SwiftStudio" frame:NSMakeRect(0,b.size.height-82,b.size.width,64) font:TitleFont(48) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter;
+  [self addLine:NSMakeRect(0,b.size.height-92,b.size.width,2)];
+  [self button:@"Back to log" frame:NSMakeRect(18,b.size.height-70,156,42) action:@selector(backToLogButton:) blue:YES];
+  CGFloat y = b.size.height - 178;
   for (NSString *pid in self.projectIDs) {
     NSDictionary *p = self.store[@"projects"][pid]; BOOL selected = [pid isEqualToString:self.activeProjectID];
-    NSButton *row = [self button:@"" frame:NSMakeRect(18,y,b.size.width-36,58) action:@selector(selectProject:) blue:NO]; row.identifier = pid; row.layer.backgroundColor = selected ? Blue().CGColor : DarkRow().CGColor; row.layer.cornerRadius = 14;
-    [self label:p[@"name"] ?: pid frame:NSMakeRect(38,y+10,360,38) font:TitleFont(32) color:NSColor.whiteColor];
-    y -= 76;
+    NSButton *row = [self button:@"" frame:NSMakeRect(8,y,b.size.width-16,64) action:@selector(selectProject:) blue:NO]; row.identifier = pid; row.layer.backgroundColor = selected ? Blue().CGColor : DarkRow().CGColor; row.layer.cornerRadius = 16; self.projectRows[pid] = row;
+    [self label:p[@"name"] ?: pid frame:NSMakeRect(26,y+13,360,42) font:TitleFont(39) color:NSColor.whiteColor];
+    NSButton *hit = [self button:@"" frame:row.frame action:@selector(selectProject:) blue:NO]; hit.identifier = pid; hit.layer.backgroundColor = NSColor.clearColor.CGColor; hit.layer.opacity = 0.01;
+    y -= 88;
   }
   [self button:@"Open" frame:NSMakeRect(18,18,100,38) action:@selector(openLocalProject:) blue:YES];
   [self button:@"Share" frame:NSMakeRect(130,18,120,38) action:@selector(shareLocalProject:) blue:YES];
 }
-- (void)selectProject:(NSButton *)sender { self.activeProjectID = sender.identifier; self.store[@"activeProject"] = self.activeProjectID; [self saveStore]; [self showProjectsPage]; }
+- (void)selectProject:(NSButton *)sender { self.activeProjectID = sender.identifier; self.store[@"activeProject"] = self.activeProjectID; for (NSString *pid in self.projectRows) self.projectRows[pid].layer.backgroundColor = ([pid isEqualToString:self.activeProjectID] ? Blue() : DarkRow()).CGColor; [self saveStore]; }
 - (void)openIncomingProject:(id)sender {
   self.editingProject = [self.incomingProject mutableCopy];
   self.editingSharedProject = YES;
@@ -407,21 +419,137 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   [self showEditorWithPreview:YES];
 }
 - (void)showEditorWithPreview:(BOOL)preview {
-  [self clearDynamic]; NSRect b = self.root.bounds; CGFloat headerY = b.size.height - 86; CGFloat leftW = 250;
-  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:(self.editingSharedProject ? @selector(backToLog:) : @selector(enterStudio:)) blue:YES];
-  [self label:self.editingProject[@"name"] ?: @"Project" frame:NSMakeRect(64,headerY+6,230,58) font:TitleFont(38) color:NSColor.whiteColor];
+  [self clearDynamic]; NSRect b = self.root.bounds; CGFloat leftW = 244, headerY = MAX(590, b.size.height - 91), contentTop = headerY - 19;
+  CGFloat editorX = 264, editorY = 18, editorW = MAX(260, b.size.width - editorX - 44), editorH = MAX(220, contentTop - editorY);
+  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:(self.editingSharedProject ? @selector(backToLogButton:) : @selector(enterStudio:)) blue:YES];
+  [self label:self.editingProject[@"name"] ?: @"Project" frame:NSMakeRect(64,headerY+6,230,58) font:TitleFont(42) color:NSColor.whiteColor];
   if (preview) [self button:@"Send" frame:NSMakeRect(310,headerY+16,120,44) action:@selector(sendLocalPreview:) blue:YES];
   [self button:(self.editingSharedProject ? @"Send" : @"Share") frame:NSMakeRect(preview ? 442 : 310,headerY+16,120,44) action:(self.editingSharedProject ? @selector(sendBackToStudio:) : @selector(shareLocalProject:)) blue:YES];
   [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)];
-  CGFloat y = headerY - 42; for (NSString *fid in [self fileIDsForProject:self.editingProject]) { NSDictionary *f = self.editingProject[@"files"][fid]; [self label:f[@"name"] ?: fid frame:NSMakeRect(20,y,190,28) font:MonoFont(20) color:NSColor.whiteColor]; y -= 36; }
-  NSString *code = self.editingProject[@"files"][self.activeFileID][@"code"] ?: @"";
-  NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(leftW+16,18,b.size.width-leftW-34,headerY-36)];
-  scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; scroll.hasVerticalScroller = YES; scroll.autohidesScrollers = NO; scroll.verticalLineScroll = 10; scroll.verticalPageScroll = 80;
-  self.editor = [[NSTextView alloc] initWithFrame:scroll.bounds]; self.editor.font = MonoFont(18); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.delegate = self; self.editor.string = code;
-  scroll.documentView = self.editor; [self.dynamicViews addObject:scroll]; [self.root addSubview:scroll];
+  CGFloat y = contentTop - 30; for (NSString *fid in [self fileIDsForProject:self.editingProject]) { NSDictionary *f = self.editingProject[@"files"][fid]; if (self.swiftLogo) { NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,y-1,32,28)]; iv.image = self.swiftLogo; [self.dynamicViews addObject:iv]; [self.root addSubview:iv]; } [self label:f[@"name"] ?: fid frame:NSMakeRect(54,y,175,27) font:MonoFont(21) color:NSColor.whiteColor]; NSButton *hit = [self button:@"" frame:NSMakeRect(0,y-4,240,34) action:@selector(selectFile:) blue:NO]; hit.identifier = fid; hit.layer.backgroundColor = ([fid isEqualToString:self.activeFileID] ? Blue() : NSColor.clearColor).CGColor; hit.layer.opacity = [fid isEqualToString:self.activeFileID] ? 0.35 : 0.0; y -= 36; }
+  NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(editorX,editorY,editorW,editorH)];
+  scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; scroll.borderType = NSNoBorder; [self tuneScrollView:scroll]; scroll.wantsLayer = YES; scroll.layer.backgroundColor = NSColor.blackColor.CGColor;
+  self.editor = [[NSTextView alloc] initWithFrame:scroll.bounds]; self.editor.font = MonoFont(19); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.automaticQuoteSubstitutionEnabled = NO; self.editor.automaticDashSubstitutionEnabled = NO; self.editor.automaticTextReplacementEnabled = NO; self.editor.allowsUndo = YES; self.editor.delegate = self; self.editor.string = [self currentFile][@"code"] ?: @"";
+  scroll.documentView = self.editor; [self.dynamicViews addObject:scroll]; [self.root addSubview:scroll]; [self applySyntaxHighlighting];
 }
-- (void)textDidChange:(NSNotification *)n { if (!self.activeFileID.length) return; self.editingProject[@"files"][self.activeFileID][@"code"] = self.editor.string ?: @""; self.editingProject[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); if (!self.editingSharedProject) [self saveStore]; }
-- (void)saveEditingProject { if (!self.activeFileID.length || !self.editor) return; self.editingProject[@"files"][self.activeFileID][@"code"] = self.editor.string ?: @""; self.editingProject[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); if (!self.editingSharedProject) [self saveStore]; }
+- (void)editorChangedProgrammatically {
+  [self saveEditingProject];
+  [self applySyntaxHighlighting];
+}
+- (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)replacementString {
+  if (textView != self.editor) return YES;
+  NSString *text = textView.string ?: @"";
+  if ([replacementString isEqualToString:@"{"]) {
+    NSRange currentLineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
+    NSString *currentLine = [text substringWithRange:NSMakeRange(currentLineRange.location, MIN(currentLineRange.length, text.length - currentLineRange.location))];
+    NSMutableString *targetIndent = [NSMutableString string];
+    for (NSUInteger i = 0; i < currentLine.length; i++) { unichar c = [currentLine characterAtIndex:i]; if (c == ' ' || c == '\t') [targetIndent appendFormat:@"%C", c]; else break; }
+    [targetIndent appendString:@"    "];
+    [textView.textStorage replaceCharactersInRange:range withString:@"{"];
+    NSUInteger cursor = range.location + 1;
+    NSString *updated = textView.string ?: @"";
+    if (cursor < updated.length && [updated characterAtIndex:cursor] == '\n') {
+      NSUInteger scan = cursor + 1;
+      NSUInteger sourceIndentLength = NSNotFound;
+      while (scan < textView.string.length) {
+        NSString *currentText = textView.string ?: @"";
+        NSRange lineRange = [currentText lineRangeForRange:NSMakeRange(scan, 0)];
+        NSString *lineText = [currentText substringWithRange:NSMakeRange(lineRange.location, MIN(lineRange.length, currentText.length - lineRange.location))];
+        NSString *trimmed = [lineText stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!trimmed.length) { scan = NSMaxRange(lineRange); continue; }
+        if ([trimmed hasPrefix:@"}"]) break;
+        NSUInteger existingIndentLength = 0;
+        while (existingIndentLength < lineText.length) { unichar c = [lineText characterAtIndex:existingIndentLength]; if (c == ' ' || c == '\t') existingIndentLength++; else break; }
+        if (sourceIndentLength == NSNotFound) sourceIndentLength = existingIndentLength;
+        if (existingIndentLength != sourceIndentLength) break;
+        [textView.textStorage replaceCharactersInRange:NSMakeRange(lineRange.location, existingIndentLength) withString:targetIndent];
+        scan = lineRange.location + targetIndent.length + (lineRange.length - existingIndentLength);
+      }
+    }
+    [textView setSelectedRange:NSMakeRange(cursor, 0)];
+    [self editorChangedProgrammatically];
+    return NO;
+  }
+  if ([replacementString isEqualToString:@"}"]) {
+    NSRange lineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
+    NSString *beforeCursor = [text substringWithRange:NSMakeRange(lineRange.location, MIN(range.location, text.length) - lineRange.location)];
+    if ([[beforeCursor stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] length] == 0 && beforeCursor.length >= 4) {
+      NSUInteger remove = MIN((NSUInteger)4, beforeCursor.length);
+      NSRange replace = NSMakeRange(lineRange.location + beforeCursor.length - remove, remove + range.length);
+      [textView.textStorage replaceCharactersInRange:replace withString:@"}"];
+      [textView setSelectedRange:NSMakeRange(replace.location + 1, 0)];
+      [self editorChangedProgrammatically];
+      return NO;
+    }
+    return YES;
+  }
+  if (![replacementString isEqualToString:@"\n"]) return YES;
+  NSRange lineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
+  NSString *line = [text substringWithRange:NSMakeRange(lineRange.location, MIN(lineRange.length, text.length - lineRange.location))];
+  NSMutableString *indent = [NSMutableString string];
+  for (NSUInteger i = 0; i < line.length; i++) { unichar c = [line characterAtIndex:i]; if (c == ' ' || c == '\t') [indent appendFormat:@"%C", c]; else break; }
+  if (range.location > 0 && [[text substringWithRange:NSMakeRange(range.location - 1, 1)] isEqualToString:@"{"]) [indent appendString:@"    "];
+  NSString *insert = [@"\n" stringByAppendingString:indent];
+  [textView.textStorage replaceCharactersInRange:range withString:insert];
+  [textView setSelectedRange:NSMakeRange(range.location + insert.length, 0)];
+  [self editorChangedProgrammatically];
+  return NO;
+}
+- (void)colorPattern:(NSString *)pattern color:(NSColor *)color inString:(NSString *)text {
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  [regex enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    if (result.range.location != NSNotFound) [self.editor.textStorage addAttribute:NSForegroundColorAttributeName value:color range:result.range];
+  }];
+}
+- (void)colorPattern:(NSString *)pattern capture:(NSUInteger)capture color:(NSColor *)color inString:(NSString *)text {
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  [regex enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    if (capture < result.numberOfRanges) {
+      NSRange r = [result rangeAtIndex:capture];
+      if (r.location != NSNotFound && NSMaxRange(r) <= text.length) [self.editor.textStorage addAttribute:NSForegroundColorAttributeName value:color range:r];
+    }
+  }];
+}
+- (void)applySyntaxHighlighting {
+  if (!self.editor || self.applyingHighlight) return;
+  self.applyingHighlight = YES;
+  NSRange selected = self.editor.selectedRange;
+  NSString *text = self.editor.string ?: @"";
+  NSDictionary *base = @{NSForegroundColorAttributeName: NSColor.whiteColor, NSFontAttributeName: MonoFont(19)};
+  [self.editor.textStorage setAttributes:base range:NSMakeRange(0, text.length)];
+  NSColor *pink = [NSColor colorWithCalibratedRed:1.0 green:0.24 blue:0.72 alpha:1.0];
+  NSColor *blue = [NSColor colorWithCalibratedRed:0.28 green:0.62 blue:1.0 alpha:1.0];
+  NSColor *cyan = [NSColor colorWithCalibratedRed:0.15 green:0.95 blue:1.0 alpha:1.0];
+  NSColor *green = [NSColor colorWithCalibratedRed:0.35 green:1.0 blue:0.45 alpha:1.0];
+  NSColor *red = [NSColor colorWithCalibratedRed:1.0 green:0.25 blue:0.25 alpha:1.0];
+  NSColor *orange = [NSColor colorWithCalibratedRed:1.0 green:0.52 blue:0.12 alpha:1.0];
+  [self colorPattern:@"\\b(import|struct|class|enum|protocol|extension|func|var|let|if|else|for|while|return|switch|case|default|private|public|internal|static|some|false|true|nil|in|where)\\b" color:pink inString:text];
+  [self colorPattern:@"#[A-Za-z_][A-Za-z0-9_]*" color:blue inString:text];
+  [self colorPattern:@"#(if|elseif|else|endif)\\b[^\\n]*" color:orange inString:text];
+  [self colorPattern:@"@[A-Za-z_][A-Za-z0-9_]*" color:blue inString:text];
+  [self colorPattern:@"[(,]\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*:" capture:1 color:blue inString:text];
+  [self colorPattern:@"\\.[A-Za-z_][A-Za-z0-9_]*" color:blue inString:text];
+  [self colorPattern:@"\\$[A-Za-z_][A-Za-z0-9_]*" color:green inString:text];
+  NSRegularExpression *vars = [NSRegularExpression regularExpressionWithPattern:@"\\b(var|let)\\s+([A-Za-z_][A-Za-z0-9_]*)" options:0 error:nil];
+  [vars enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    NSRange nameRange = [result rangeAtIndex:2];
+    if (nameRange.location == NSNotFound || NSMaxRange(nameRange) > text.length) return;
+    NSString *name = [text substringWithRange:nameRange];
+    [self colorPattern:[NSString stringWithFormat:@"\\b%@\\b", name] color:green inString:text];
+  }];
+  [self colorPattern:@"\\b([A-Z][A-Za-z0-9_]*)\\s*(?=\\()" capture:1 color:green inString:text];
+  [self colorPattern:@"\\b(Text|VStack|HStack|ZStack|List|Button|Image|Spacer|ScrollView|NavigationStack|Form|Section|Toggle|Slider|TextField|Rectangle|RoundedRectangle|Circle|ForEach)\\b" color:blue inString:text];
+  [self colorPattern:@"\\b(Int|Double|Float|String|Bool|Void|View|Scene|App|Color|Font|Binding|State|ObservedObject|EnvironmentObject|CGFloat|NSApplication)\\b" color:blue inString:text];
+  [self colorPattern:@"\\b(var|let)\\s+([A-Za-z_][A-Za-z0-9_]*)" capture:2 color:cyan inString:text];
+  [self colorPattern:@"\\b(struct|class|enum|protocol|func)\\s+([A-Za-z_][A-Za-z0-9_]*)" capture:2 color:cyan inString:text];
+  [self colorPattern:@"\"([^\"\\\\]|\\\\.)*\"" color:red inString:text];
+  [self colorPattern:@"//[^\\n]*" color:green inString:text];
+  [self.editor setSelectedRange:NSMakeRange(MIN(selected.location, text.length), MIN(selected.length, text.length - MIN(selected.location, text.length)))];
+  self.applyingHighlight = NO;
+}
+- (void)textDidChange:(NSNotification *)n { [self saveEditingProject]; [self applySyntaxHighlighting]; }
+- (void)saveEditingProject { if (!self.activeFileID.length || !self.editor) return; [self currentFile][@"code"] = self.editor.string ?: @""; self.editingProject[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); self.editingProject[@"activeFile"] = self.activeFileID; if (!self.editingSharedProject) [self saveStore]; }
+- (void)selectFile:(NSButton *)sender { [self saveEditingProject]; self.activeFileID = sender.identifier; self.editingProject[@"activeFile"] = self.activeFileID; if (!self.editingSharedProject) [self saveStore]; [self showEditorWithPreview:!self.editingSharedProject]; }
 - (NSString *)combinedSourceForProject:(NSDictionary *)project {
   NSMutableString *source = [NSMutableString string]; for (NSString *fid in [self fileIDsForProject:project]) [source appendFormat:@"\n// %@.swift\n%@\n", fid, project[@"files"][fid][@"code"] ?: @""]; return source;
 }
@@ -442,7 +570,8 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   BOOL ok = PatchDocument(@"Threads/ProjectReturn", @{@"status":@"add_to_projects", @"requestId":requestID, @"project":project, @"sentAt":NSDate.date}, &error);
   [self appendLog:ok ? @"Add to projects" : [NSString stringWithFormat:@"Share failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
 }
-- (void)backToLog:(id)sender { [self showLog]; }
+- (void)backToLogButton:(id)sender { [self saveEditingProject]; self.editor = nil; self.editingProject = nil; self.editingSharedProject = NO; [self showLog]; }
+- (void)backToLog:(id)sender { [self backToLogButton:sender]; }
 - (void)watchThreads {
   while (YES) {
     for (NSString *thread in self.threads) {
