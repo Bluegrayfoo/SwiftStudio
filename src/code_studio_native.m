@@ -146,6 +146,9 @@ static void UpdateHistory(NSString *appName) {
 @property NSView *previewContentView;
 @property NSWindow *previewWindow;
 @property void *previewLibraryHandle;
+@property NSString *lastIncomingShareID;
+@property NSMutableDictionary *incomingSharedProject;
+@property NSString *incomingShareMessage;
 @end
 
 @implementation StudioDelegate
@@ -155,6 +158,7 @@ static void UpdateHistory(NSString *appName) {
   [self loadStore]; [self buildWindow]; [self showMain]; UpdateHistory(@"SwiftStudio"); [NSApp activateIgnoringOtherApps:YES];
   [NSTimer scheduledTimerWithTimeInterval:30 target:self selector:@selector(refreshAgeLabels:) userInfo:nil repeats:YES];
   [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(updatePreviewPlacement:) userInfo:nil repeats:YES];
+  [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(checkIncomingProjectShare:) userInfo:nil repeats:YES];
 }
 - (void)loadStore {
   NSData *data = [NSData dataWithContentsOfFile:self.docsPath];
@@ -218,6 +222,10 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)showMain {
   self.showingProject = NO; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects]; [self label:@"SwiftStudio" frame:NSMakeRect(0,680,1176,72) font:TitleFont(48) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter; [self addLine:NSMakeRect(0,665,1176,2)];
+  if (self.incomingSharedProject) {
+    [self label:self.incomingShareMessage ?: @"Project sent back" frame:NSMakeRect(452,620,260,32) font:TitleFont(24) color:NSColor.whiteColor].alignment = NSTextAlignmentRight;
+    [self button:([self.incomingShareMessage isEqualToString:@"Add to projects"] ? @"+" : @"Include") frame:NSMakeRect(724,617,116,36) action:@selector(includeSharedProject:) blue:YES];
+  }
   CGFloat y = 580; for (NSString *pid in self.projectIDs) {
     NSDictionary *p = self.store[@"projects"][pid]; BOOL selected = [pid isEqualToString:self.activeProjectID]; NSButton *row = [self button:@"" frame:NSMakeRect(8,y,1160,64) action:@selector(selectProject:) blue:NO]; row.identifier = pid; row.layer.backgroundColor = (selected ? Blue() : DarkRow()).CGColor; row.layer.cornerRadius = 16;
     self.projectRows[pid] = row;
@@ -234,6 +242,38 @@ static void UpdateHistory(NSString *appName) {
   [self button:@"Open" frame:NSMakeRect(62,18,96,36) action:@selector(openSelectedProject:) blue:YES];
   [self button:@"Rename" frame:NSMakeRect(168,18,130,36) action:@selector(renameProject:) blue:YES];
   [self redButton:@"Delete" frame:NSMakeRect(308,18,118,36) action:@selector(deleteProject:)];
+}
+- (void)checkIncomingProjectShare:(id)sender {
+  NSError *error = nil;
+  NSDictionary *doc = GetDocument(@"Threads/ProjectReturn", &error);
+  if (error || ![doc[@"status"] length]) return;
+  NSString *requestID = doc[@"requestId"];
+  NSDictionary *project = doc[@"project"];
+  if (!requestID.length || !project || [requestID isEqualToString:self.lastIncomingShareID]) return;
+  self.lastIncomingShareID = requestID;
+  self.incomingSharedProject = [project mutableCopy];
+  self.incomingShareMessage = [doc[@"status"] isEqualToString:@"add_to_projects"] ? @"Add to projects" : @"Project sent back";
+  if (self.showingProject) [self appendConsole:self.incomingShareMessage];
+  else [self showMain];
+}
+- (void)includeSharedProject:(id)sender {
+  if (!self.incomingSharedProject) return;
+  NSString *incomingName = self.incomingSharedProject[@"name"] ?: @"SharedProject";
+  NSString *base = [[incomingName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@""];
+  if (!base.length) base = @"SharedProject";
+  NSString *pid = [base lowercaseString];
+  NSUInteger suffix = 2;
+  while (self.store[@"projects"][pid]) pid = [NSString stringWithFormat:@"%@%lu", [base lowercaseString], (unsigned long)suffix++];
+  NSMutableDictionary *project = [self.incomingSharedProject mutableCopy];
+  project[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
+  if (!project[@"activeFile"]) project[@"activeFile"] = [project[@"files"] allKeys].firstObject ?: @"ContentView";
+  self.store[@"projects"][pid] = project;
+  self.activeProjectID = pid;
+  self.store[@"activeProject"] = pid;
+  self.incomingSharedProject = nil;
+  self.incomingShareMessage = nil;
+  [self saveStore];
+  [self showMain];
 }
 - (void)selectProject:(NSButton *)sender {
   self.activeProjectID = sender.identifier;
@@ -298,7 +338,7 @@ static void UpdateHistory(NSString *appName) {
     self.previewPaneFrame = NSZeroRect;
   }
   CGFloat editorH = MAX(220, contentTop - editorY);
-  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,190,44) action:@selector(sendForPreview:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(448,headerY+16,112,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(572,headerY+16,130,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(714,headerY+16,170,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)]; [self addLine:NSMakeRect(editorX,155,editorW,2)];
+  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,145,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(402,headerY+16,130,44) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(544,headerY+16,100,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(656,headerY+16,120,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(788,headerY+16,150,44) action:@selector(renameFile:) blue:YES]; if (self.incomingSharedProject) { [self label:self.incomingShareMessage ?: @"Project sent back" frame:NSMakeRect(950,headerY+25,130,24) font:TitleFont(17) color:NSColor.whiteColor]; [self button:([self.incomingShareMessage isEqualToString:@"Add to projects"] ? @"+" : @"Include") frame:NSMakeRect(1088,headerY+18,78,38) action:@selector(includeSharedProject:) blue:YES]; } [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)]; [self addLine:NSMakeRect(editorX,155,editorW,2)];
   if (previewVisible) {
     CGFloat dividerX = self.previewPaneFrame.origin.x - 9 - sideBarW;
     [self addLine:NSMakeRect(dividerX, 0, 2, headerY)];
@@ -471,6 +511,13 @@ static void UpdateHistory(NSString *appName) {
 - (void)renameProjectInEditor:(id)sender { [self saveEditor]; [self renameProject:sender]; [self showProject]; }
 - (void)selectFile:(NSButton *)sender { [self saveEditor]; self.activeFileID = sender.identifier; [self project][@"activeFile"] = self.activeFileID; [self saveStore]; [self showProject]; }
 - (void)newFile:(id)sender { NSString *fid = [NSString stringWithFormat:@"File%lu", (unsigned long)self.fileIDs.count + 1]; [self project][@"files"][fid] = [@{@"name":fid, @"code":@"import SwiftUI\n"} mutableCopy]; self.activeFileID = fid; [self project][@"activeFile"] = fid; [self saveStore]; [self showProject]; }
+- (void)shareProject:(id)sender {
+  [self saveEditor];
+  NSString *requestID = [NSString stringWithFormat:@"studio-%.0f", NSDate.date.timeIntervalSince1970 * 1000];
+  NSError *error = nil;
+  BOOL ok = PatchDocument(@"Threads/ProjectShare", @{@"status":@"project_shared", @"requestId":requestID, @"sender":@"studio", @"project":[self project], @"sentAt":NSDate.date}, &error);
+  [self appendConsole:ok ? @"Project shared" : [NSString stringWithFormat:@"Share failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
+}
 - (void)togglePreviewPane:(id)sender { self.previewPaneCollapsed = !self.previewPaneCollapsed; if (self.previewPaneCollapsed) self.previewPaneWide = NO; [self showProject]; [self placePreviewContent]; }
 - (void)widenPreviewPane:(id)sender { self.previewPaneCollapsed = NO; self.previewPaneWide = YES; [self showProject]; [self placePreviewContent]; }
 - (void)normalPreviewPane:(id)sender { self.previewPaneCollapsed = NO; self.previewPaneWide = NO; [self showProject]; [self placePreviewContent]; }

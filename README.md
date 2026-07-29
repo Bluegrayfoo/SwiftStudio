@@ -3,7 +3,7 @@
 SwiftStudio contains native macOS terminal-runnable GUI apps:
 
 - `code_studio`: a SwiftUI project/file editor that sends raw source through Firestore, downloads the compiled preview library returned by the runner, and hosts the preview locally.
-- `preview_runner`: companion source is included for the runner side. It silently compiles SwiftUI into a loadable preview library, uploads that library through Firestore chunks, and reports status back; it does not open the preview window.
+- `preview_runner`: a companion runner app with a log window. It compiles SwiftUI into a loadable preview library, uploads that library through Firestore chunks, reports status back, and can exchange projects with Studio.
 
 The repository is configured for the GitHub repo:
 
@@ -33,7 +33,7 @@ The installer builds the native Cocoa Studio executable and places it in:
 ~/cmds
 ```
 
-Install the headless runner on the runner computer with:
+Install the preview runner on the runner computer with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Bluegrayfoo/SwiftStudio/main/install_runner.sh | bash
@@ -82,9 +82,13 @@ SwiftStudio uses the Firebase project embedded in the source.
 - `Percent/Compile.%`
 - `Percent/Run.%`
 - `Threads/<thread>/Compiled/<requestId>-0000...`
+- `Threads/ProjectShare`
+- `Threads/ProjectReturn`
 - `LatestHistory/History.hist`
 
-`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source silently, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, wraps `ContentView` in an exported `NSHostingView` factory, uploads the compiled preview library as base64 chunks, and writes the status back. The runner is headless and never opens a preview window. When Studio sees a successful response, Studio downloads the compiled library, writes it to a uniquely named local temp library for that request, loads it, and hosts the returned preview view locally.
+`code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, wraps `ContentView` in an exported `NSHostingView` factory, uploads the compiled preview library as base64 chunks, and writes the status back. The runner has its own log window, but it does not open preview windows. When Studio sees a successful response, Studio downloads the compiled library, writes it to a uniquely named local temp library for that request, loads it, and hosts the returned preview view locally.
+
+Project sharing uses `Threads/ProjectShare` for Studio-to-runner shares and `Threads/ProjectReturn` for runner-to-Studio project returns or add-to-projects shares.
 
 The preview is inline only while Studio is fullscreen and the preview pane is expanded. Outside fullscreen, or when the fullscreen pane is collapsed, Studio moves the same hosted preview into a separate Studio-owned preview window. Studio continually rechecks placement so an already-loaded preview follows fullscreen, split-screen, resize, and collapse changes.
 

@@ -14,10 +14,10 @@ mkdir -p "$WORK_DIR/src" "$INSTALL_DIR"
 
 curl -fsSL "$REPO_RAW/src/preview_runner_native.m" -o "$WORK_DIR/src/preview_runner_native.m"
 
-clang -fobjc-arc -framework Foundation "$WORK_DIR/src/preview_runner_native.m" -o "$INSTALL_DIR/preview_runner"
+clang -fobjc-arc -framework AppKit "$WORK_DIR/src/preview_runner_native.m" -o "$INSTALL_DIR/preview_runner"
 chmod +x "$INSTALL_DIR/preview_runner"
 
-echo "Installed headless SwiftStudio runner:"
+echo "Installed SwiftStudio preview runner app:"
 echo "  $INSTALL_DIR/preview_runner"
 echo
 echo "Run:"
