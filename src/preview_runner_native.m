@@ -139,6 +139,36 @@ static NSString *StripPreviewBlocks(NSString *source) {
   return out;
 }
 
+static NSDictionary *RunBuildTask(NSArray<NSString *> *arguments, NSString *cache, NSTimeInterval timeout, double progressStart, double progressEnd) {
+  NSTask *task = [NSTask new];
+  task.launchPath = arguments.firstObject;
+  task.arguments = [arguments subarrayWithRange:NSMakeRange(1, arguments.count - 1)];
+  NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
+  env[@"CLANG_MODULE_CACHE_PATH"] = cache;
+  task.environment = env;
+  NSPipe *outPipe = [NSPipe pipe];
+  NSPipe *errPipe = [NSPipe pipe];
+  task.standardOutput = outPipe;
+  task.standardError = errPipe;
+  NSDate *start = NSDate.date;
+  [task launch];
+  double lastReported = progressStart;
+  SetPercent(@"Compile", progressStart);
+  while (task.isRunning && [NSDate.date timeIntervalSinceDate:start] < timeout) {
+    double elapsed = [NSDate.date timeIntervalSinceDate:start];
+    double next = MIN(progressEnd, progressStart + (elapsed / timeout) * (progressEnd - progressStart));
+    if (next - lastReported >= 2) { SetPercent(@"Compile", next); lastReported = next; }
+    [NSThread sleepForTimeInterval:0.15];
+  }
+  if (task.isRunning) {
+    [task terminate];
+    return @{@"ok": @NO, @"out": @"", @"err": @"SwiftUI compile timed out."};
+  }
+  NSString *out = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
+  NSString *err = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
+  return @{@"ok": @(task.terminationStatus == 0), @"out": out, @"err": err};
+}
+
 static NSDictionary *CompileExecutable(NSString *source, NSString *requestID, NSString *previewArch) {
   SetPercent(@"Compile", 3);
   NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-compile-%@", NSUUID.UUID.UUIDString]];
@@ -147,45 +177,53 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID, NS
   NSString *safeID = [[requestID componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@"-"];
   NSString *exeName = [NSString stringWithFormat:@"SwiftStudioPreview-%@.dylib", safeID];
   NSString *exePath = [dir stringByAppendingPathComponent:exeName];
-  if (![previewArch isEqualToString:@"x86_64"] && ![previewArch isEqualToString:@"arm64"]) previewArch = @"arm64";
-  NSString *cache = [[@"~/cmds/.swiftstudio-module-cache" stringByExpandingTildeInPath] stringByAppendingPathComponent:previewArch];
+  BOOL requestedX86 = [previewArch isEqualToString:@"x86_64"];
+  BOOL requestedArm = [previewArch isEqualToString:@"arm64"];
+  if (!requestedX86 && !requestedArm) previewArch = @"universal";
+  NSString *cacheRoot = [@"~/cmds/.swiftstudio-module-cache" stringByExpandingTildeInPath];
+  NSString *cache = [cacheRoot stringByAppendingPathComponent:previewArch];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
   NSString *hosted = [NSString stringWithFormat:@"import SwiftUI\nimport AppKit\n%@\n\n@_cdecl(\"SwiftStudioCreatePreviewView\")\npublic func SwiftStudioCreatePreviewView() -> UnsafeMutableRawPointer {\n    let view = NSHostingView(rootView: ContentView())\n    view.wantsLayer = true\n    view.layer?.backgroundColor = NSColor.black.cgColor\n    return Unmanaged.passRetained(view).toOpaque()\n}\n", StripPreviewBlocks(source)];
   [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   SetPercent(@"Compile", 22);
-  NSTask *compile = [NSTask new];
-  compile.launchPath = @"/usr/bin/swiftc";
-  NSString *target = [previewArch isEqualToString:@"x86_64"] ? @"x86_64-apple-macos13.0" : @"arm64-apple-macos13.0";
-  compile.arguments = @[@"-emit-library", @"-parse-as-library", @"-target", target, @"-module-cache-path", cache, sourcePath, @"-o", exePath];
-  NSMutableDictionary *env = [NSProcessInfo.processInfo.environment mutableCopy];
-  env[@"CLANG_MODULE_CACHE_PATH"] = cache;
-  compile.environment = env;
-  NSPipe *outPipe = [NSPipe pipe];
-  NSPipe *errPipe = [NSPipe pipe];
-  compile.standardOutput = outPipe;
-  compile.standardError = errPipe;
-  NSDate *start = NSDate.date;
-  [compile launch];
-  SetPercent(@"Compile", 30);
-  double lastReported = 30;
-  while (compile.isRunning && [NSDate.date timeIntervalSinceDate:start] < 75) {
-    double elapsed = [NSDate.date timeIntervalSinceDate:start];
-    double next = MIN(96, 30 + (elapsed / 75.0) * 66.0);
-    if (next - lastReported >= 2) { SetPercent(@"Compile", next); lastReported = next; }
-    [NSThread sleepForTimeInterval:0.15];
+  NSMutableArray<NSString *> *archs = [NSMutableArray array];
+  if (requestedX86) [archs addObject:@"x86_64"];
+  else if (requestedArm) [archs addObject:@"arm64"];
+  else [archs addObjectsFromArray:@[@"x86_64", @"arm64"]];
+  NSMutableArray<NSString *> *slicePaths = [NSMutableArray array];
+  NSMutableString *allOut = [NSMutableString string];
+  NSMutableString *allErr = [NSMutableString string];
+  for (NSUInteger i = 0; i < archs.count; i++) {
+    NSString *arch = archs[i];
+    NSString *target = [arch isEqualToString:@"x86_64"] ? @"x86_64-apple-macos12.0" : @"arm64-apple-macos12.0";
+    NSString *archCache = [cacheRoot stringByAppendingPathComponent:arch];
+    [[NSFileManager defaultManager] createDirectoryAtPath:archCache withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *slicePath = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"%@-%@.dylib", safeID, arch]];
+    double startProgress = 30 + ((double)i / MAX(1.0, (double)archs.count)) * 56.0;
+    double endProgress = 30 + (((double)i + 1.0) / MAX(1.0, (double)archs.count)) * 56.0;
+    NSDictionary *slice = RunBuildTask(@[@"/usr/bin/swiftc", @"-emit-library", @"-parse-as-library", @"-target", target, @"-module-cache-path", archCache, sourcePath, @"-o", slicePath], archCache, 75, startProgress, endProgress);
+    [allOut appendString:slice[@"out"] ?: @""];
+    [allErr appendString:slice[@"err"] ?: @""];
+    if (![slice[@"ok"] boolValue]) {
+      SetPercent(@"Compile", 100);
+      return @{@"ok": @NO, @"preview": allOut.length ? allOut : @"SwiftUI compile failed.", @"error": allErr};
+    }
+    [slicePaths addObject:slicePath];
   }
-  if (compile.isRunning) {
-    [compile terminate];
-    SetPercent(@"Compile", 100);
-    return @{@"ok": @NO, @"preview": @"SwiftUI compile timed out.", @"error": @""};
+  if (slicePaths.count == 1) {
+    [[NSFileManager defaultManager] moveItemAtPath:slicePaths.firstObject toPath:exePath error:nil];
+  } else {
+    NSMutableArray<NSString *> *lipoArgs = [NSMutableArray arrayWithArray:@[@"/usr/bin/lipo", @"-create"]];
+    [lipoArgs addObjectsFromArray:slicePaths];
+    [lipoArgs addObjectsFromArray:@[@"-output", exePath]];
+    NSDictionary *lipo = RunBuildTask(lipoArgs, cache, 20, 88, 96);
+    if (![lipo[@"ok"] boolValue]) {
+      SetPercent(@"Compile", 100);
+      return @{@"ok": @NO, @"preview": lipo[@"out"] ?: @"Could not combine preview library architectures.", @"error": lipo[@"err"] ?: @""};
+    }
   }
-  NSString *compilerOut = [[NSString alloc] initWithData:[outPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
-  NSString *compilerErr = [[NSString alloc] initWithData:[errPipe.fileHandleForReading readDataToEndOfFile] encoding:NSUTF8StringEncoding] ?: @"";
   SetPercent(@"Compile", 100);
-  if (compile.terminationStatus != 0) {
-    return @{@"ok": @NO, @"preview": compilerOut.length ? compilerOut : @"SwiftUI compile failed.", @"error": compilerErr};
-  }
   return @{@"ok": @YES, @"preview": @"Compiled preview library for Studio", @"error": @"", @"executablePath": exePath, @"executableName": exeName};
 }
 

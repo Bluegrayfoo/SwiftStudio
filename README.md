@@ -88,7 +88,7 @@ SwiftStudio uses the Firebase project embedded in the source.
 
 The preview is inline only while Studio is fullscreen and the preview pane is expanded. Outside fullscreen, or when the fullscreen pane is collapsed, Studio moves the same hosted preview into a separate Studio-owned preview window. Studio continually rechecks placement so an already-loaded preview follows fullscreen, split-screen, resize, and collapse changes.
 
-Studio sends its current process architecture with each preview request. The runner uses that value when compiling the preview library, so an arm64 Studio receives an arm64 library and an x86_64/Rosetta Studio receives an x86_64 library.
+Studio sends its current process architecture with each preview request. The runner uses that value when compiling the preview library, so an arm64 Studio receives an arm64 library and an x86_64/Rosetta Studio receives an x86_64 library. If an older Studio request does not include an architecture, the runner builds a universal preview library with both arm64 and x86_64 slices.
 
 `Percent/Run.%` represents the post-compile workflow:
 
