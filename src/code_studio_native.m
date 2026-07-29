@@ -199,6 +199,40 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)clearDynamic { for (NSView *v in self.dynamicViews) [v removeFromSuperview]; [self.dynamicViews removeAllObjects]; }
 - (void)addLine:(NSRect)frame { NSBox *box = [[NSBox alloc] initWithFrame:frame]; box.boxType = NSBoxCustom; box.borderColor = NSColor.whiteColor; box.fillColor = NSColor.whiteColor; [self.dynamicViews addObject:box]; [self.root addSubview:box]; }
+- (void)addNoticeCardIfNeeded {
+  if (!self.incomingSharedProject) return;
+  NSRect b = self.root.bounds;
+  CGFloat w = 360, h = 66, x = MAX(18, (b.size.width - w) / 2), y = MAX(76, b.size.height - 158);
+  NSView *card = [[NSView alloc] initWithFrame:NSMakeRect(x, y, w, h)];
+  card.wantsLayer = YES;
+  card.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.28 alpha:0.96].CGColor;
+  card.layer.cornerRadius = 12;
+  card.layer.borderColor = [NSColor colorWithCalibratedWhite:0.55 alpha:1.0].CGColor;
+  card.layer.borderWidth = 1;
+  NSTextField *message = [[NSTextField alloc] initWithFrame:NSMakeRect(18, 17, w - 142, 32)];
+  message.stringValue = self.incomingShareMessage ?: @"Project sent back";
+  message.font = TitleFont(22);
+  message.textColor = NSColor.whiteColor;
+  message.bezeled = NO;
+  message.drawsBackground = NO;
+  message.editable = NO;
+  message.selectable = NO;
+  [card addSubview:message];
+  NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(w - 116, 14, 96, 38)];
+  button.title = [self.incomingShareMessage isEqualToString:@"Add to projects"] ? @"+" : @"Include";
+  button.font = TitleFont(21);
+  button.bezelStyle = NSBezelStyleRegularSquare;
+  button.bordered = NO;
+  button.target = self;
+  button.action = @selector(includeSharedProject:);
+  button.wantsLayer = YES;
+  button.layer.cornerRadius = 19;
+  button.layer.backgroundColor = Blue().CGColor;
+  [button setContentTintColor:NSColor.whiteColor];
+  [card addSubview:button];
+  [self.dynamicViews addObject:card];
+  [self.root addSubview:card positioned:NSWindowAbove relativeTo:nil];
+}
 - (BOOL)isFullScreen { return (self.window.styleMask & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen; }
 - (BOOL)previewPaneVisible { return [self isFullScreen] && !self.previewPaneCollapsed; }
 - (void)updatePreviewPlacement:(id)sender { [self placePreviewContent]; }
@@ -222,10 +256,6 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)showMain {
   self.showingProject = NO; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects]; [self label:@"SwiftStudio" frame:NSMakeRect(0,680,1176,72) font:TitleFont(48) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter; [self addLine:NSMakeRect(0,665,1176,2)];
-  if (self.incomingSharedProject) {
-    [self label:self.incomingShareMessage ?: @"Project sent back" frame:NSMakeRect(452,620,260,32) font:TitleFont(24) color:NSColor.whiteColor].alignment = NSTextAlignmentRight;
-    [self button:([self.incomingShareMessage isEqualToString:@"Add to projects"] ? @"+" : @"Include") frame:NSMakeRect(724,617,116,36) action:@selector(includeSharedProject:) blue:YES];
-  }
   CGFloat y = 580; for (NSString *pid in self.projectIDs) {
     NSDictionary *p = self.store[@"projects"][pid]; BOOL selected = [pid isEqualToString:self.activeProjectID]; NSButton *row = [self button:@"" frame:NSMakeRect(8,y,1160,64) action:@selector(selectProject:) blue:NO]; row.identifier = pid; row.layer.backgroundColor = (selected ? Blue() : DarkRow()).CGColor; row.layer.cornerRadius = 16;
     self.projectRows[pid] = row;
@@ -242,6 +272,7 @@ static void UpdateHistory(NSString *appName) {
   [self button:@"Open" frame:NSMakeRect(62,18,96,36) action:@selector(openSelectedProject:) blue:YES];
   [self button:@"Rename" frame:NSMakeRect(168,18,130,36) action:@selector(renameProject:) blue:YES];
   [self redButton:@"Delete" frame:NSMakeRect(308,18,118,36) action:@selector(deleteProject:)];
+  [self addNoticeCardIfNeeded];
 }
 - (void)checkIncomingProjectShare:(id)sender {
   NSError *error = nil;
@@ -253,7 +284,7 @@ static void UpdateHistory(NSString *appName) {
   self.lastIncomingShareID = requestID;
   self.incomingSharedProject = [project mutableCopy];
   self.incomingShareMessage = [doc[@"status"] isEqualToString:@"add_to_projects"] ? @"Add to projects" : @"Project sent back";
-  if (self.showingProject) [self appendConsole:self.incomingShareMessage];
+  if (self.showingProject) [self showProject];
   else [self showMain];
 }
 - (void)includeSharedProject:(id)sender {
@@ -338,7 +369,7 @@ static void UpdateHistory(NSString *appName) {
     self.previewPaneFrame = NSZeroRect;
   }
   CGFloat editorH = MAX(220, contentTop - editorY);
-  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,145,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(402,headerY+16,130,44) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(544,headerY+16,100,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(656,headerY+16,120,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(788,headerY+16,150,44) action:@selector(renameFile:) blue:YES]; if (self.incomingSharedProject) { [self label:self.incomingShareMessage ?: @"Project sent back" frame:NSMakeRect(950,headerY+25,130,24) font:TitleFont(17) color:NSColor.whiteColor]; [self button:([self.incomingShareMessage isEqualToString:@"Add to projects"] ? @"+" : @"Include") frame:NSMakeRect(1088,headerY+18,78,38) action:@selector(includeSharedProject:) blue:YES]; } [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)]; [self addLine:NSMakeRect(editorX,155,editorW,2)];
+  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,145,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(402,headerY+16,130,44) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(544,headerY+16,100,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(656,headerY+16,120,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(788,headerY+16,150,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)]; [self addLine:NSMakeRect(editorX,155,editorW,2)];
   if (previewVisible) {
     CGFloat dividerX = self.previewPaneFrame.origin.x - 9 - sideBarW;
     [self addLine:NSMakeRect(dividerX, 0, 2, headerY)];
@@ -371,7 +402,8 @@ static void UpdateHistory(NSString *appName) {
     self.editor = [[NSTextView alloc] initWithFrame:editScroll.bounds]; self.editor.font = MonoFont(19); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.automaticQuoteSubstitutionEnabled = NO; self.editor.automaticDashSubstitutionEnabled = NO; self.editor.automaticTextReplacementEnabled = NO; self.editor.allowsUndo = YES; self.editor.delegate = self; self.editor.string = [self file][@"code"] ?: @""; editScroll.documentView = self.editor; [self.dynamicViews addObject:editScroll]; [self.root addSubview:editScroll]; [self applySyntaxHighlighting];
     NSScrollView *consoleScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(editorX,consoleY,editorW,consoleH)]; [self tuneScrollView:consoleScroll]; consoleScroll.wantsLayer = YES; consoleScroll.layer.backgroundColor = NSColor.blackColor.CGColor; self.console = [[NSTextView alloc] initWithFrame:consoleScroll.bounds]; self.console.font = MonoFont(19); self.console.textColor = NSColor.whiteColor; self.console.backgroundColor = NSColor.blackColor; self.console.editable = NO; self.console.verticallyResizable = YES; self.console.maxSize = NSMakeSize(FLT_MAX, FLT_MAX); consoleScroll.documentView = self.console; [self.dynamicViews addObject:consoleScroll]; [self.root addSubview:consoleScroll]; [self refreshConsole:nil];
   }
-  [self placePreviewContent];
+	  [self placePreviewContent];
+  [self addNoticeCardIfNeeded];
 }
 - (void)editorChangedProgrammatically {
   [self file][@"code"] = self.editor.string ?: @"";
@@ -516,7 +548,7 @@ static void UpdateHistory(NSString *appName) {
   NSString *requestID = [NSString stringWithFormat:@"studio-%.0f", NSDate.date.timeIntervalSince1970 * 1000];
   NSError *error = nil;
   BOOL ok = PatchDocument(@"Threads/ProjectShare", @{@"status":@"project_shared", @"requestId":requestID, @"sender":@"studio", @"project":[self project], @"sentAt":NSDate.date}, &error);
-  [self appendConsole:ok ? @"Project shared" : [NSString stringWithFormat:@"Share failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
+  if (!ok) [self appendConsole:[NSString stringWithFormat:@"Share failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
 }
 - (void)togglePreviewPane:(id)sender { self.previewPaneCollapsed = !self.previewPaneCollapsed; if (self.previewPaneCollapsed) self.previewPaneWide = NO; [self showProject]; [self placePreviewContent]; }
 - (void)widenPreviewPane:(id)sender { self.previewPaneCollapsed = NO; self.previewPaneWide = YES; [self showProject]; [self placePreviewContent]; }

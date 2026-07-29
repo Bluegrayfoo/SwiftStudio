@@ -343,6 +343,40 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
 }
 - (void)addLine:(NSRect)frame { NSBox *box = [[NSBox alloc] initWithFrame:frame]; box.boxType = NSBoxCustom; box.borderColor = NSColor.whiteColor; box.fillColor = NSColor.whiteColor; [self.dynamicViews addObject:box]; [self.root addSubview:box]; }
 - (void)tuneScrollView:(NSScrollView *)scrollView { scrollView.hasVerticalScroller = YES; scrollView.autohidesScrollers = NO; scrollView.verticalLineScroll = 10; scrollView.verticalPageScroll = 80; scrollView.scrollerStyle = NSScrollerStyleOverlay; }
+- (void)addSharedProjectNoticeIfNeeded {
+  if (!self.incomingProject) return;
+  NSRect b = self.root.bounds;
+  CGFloat w = 330, h = 66, x = MAX(18, (b.size.width - w) / 2), y = MAX(76, b.size.height - 158);
+  NSView *card = [[NSView alloc] initWithFrame:NSMakeRect(x, y, w, h)];
+  card.wantsLayer = YES;
+  card.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.28 alpha:0.96].CGColor;
+  card.layer.cornerRadius = 12;
+  card.layer.borderColor = [NSColor colorWithCalibratedWhite:0.55 alpha:1.0].CGColor;
+  card.layer.borderWidth = 1;
+  NSTextField *message = [[NSTextField alloc] initWithFrame:NSMakeRect(18, 17, w - 132, 32)];
+  message.stringValue = @"Project shared";
+  message.font = TitleFont(22);
+  message.textColor = NSColor.whiteColor;
+  message.bezeled = NO;
+  message.drawsBackground = NO;
+  message.editable = NO;
+  message.selectable = NO;
+  [card addSubview:message];
+  NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(w - 104, 14, 84, 38)];
+  button.title = @"Open";
+  button.font = TitleFont(20);
+  button.bezelStyle = NSBezelStyleRegularSquare;
+  button.bordered = NO;
+  button.target = self;
+  button.action = @selector(openIncomingProject:);
+  button.wantsLayer = YES;
+  button.layer.cornerRadius = 19;
+  button.layer.backgroundColor = Blue().CGColor;
+  [button setContentTintColor:NSColor.whiteColor];
+  [card addSubview:button];
+  [self.dynamicViews addObject:card];
+  [self.root addSubview:card positioned:NSWindowAbove relativeTo:nil];
+}
 - (void)appendLog:(NSString *)line {
   dispatch_async(dispatch_get_main_queue(), ^{
     if (!self.logText) self.logText = [NSMutableString string];
@@ -355,14 +389,11 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   [self label:@"Preview Runner" frame:NSMakeRect(0,b.size.height-78,b.size.width,60) font:TitleFont(42) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter;
   [self button:@"Enter studio" frame:NSMakeRect(18,b.size.height-62,170,42) action:@selector(enterStudio:) blue:YES];
   [self addLine:NSMakeRect(0,b.size.height-86,b.size.width,2)];
-  if (self.incomingProject) {
-    [self label:@"Project shared" frame:NSMakeRect(32,b.size.height-136,220,34) font:TitleFont(24) color:NSColor.whiteColor];
-    [self button:@"Open" frame:NSMakeRect(260,b.size.height-140,100,38) action:@selector(openIncomingProject:) blue:YES];
-  }
   NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(18,18,b.size.width-36,b.size.height-170)];
   scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; scroll.hasVerticalScroller = YES; scroll.autohidesScrollers = NO; scroll.verticalLineScroll = 10; scroll.verticalPageScroll = 80; scroll.wantsLayer = YES; scroll.layer.backgroundColor = NSColor.blackColor.CGColor;
   self.logView = [[NSTextView alloc] initWithFrame:scroll.bounds]; self.logView.font = MonoFont(18); self.logView.textColor = NSColor.whiteColor; self.logView.backgroundColor = NSColor.blackColor; self.logView.editable = NO; self.logView.string = self.logText ?: @"";
   scroll.documentView = self.logView; [self.dynamicViews addObject:scroll]; [self.root addSubview:scroll];
+  [self addSharedProjectNoticeIfNeeded];
 }
 - (void)checkProjectShare:(id)sender {
   NSError *error = nil; NSDictionary *doc = GetDocument(@"Threads/ProjectShare", &error);
@@ -370,7 +401,6 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   NSString *requestID = doc[@"requestId"]; NSDictionary *project = doc[@"project"];
   if (!requestID.length || !project || [requestID isEqualToString:self.lastIncomingShareID]) return;
   self.lastIncomingShareID = requestID; self.incomingProject = [project mutableCopy];
-  [self appendLog:@"Project shared"];
   if (!self.editor) [self showLog];
 }
 - (void)loadStore {
@@ -561,14 +591,14 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
 - (void)sendBackToStudio:(id)sender {
   [self saveEditingProject]; NSString *requestID = [NSString stringWithFormat:@"runner-return-%.0f", NSDate.date.timeIntervalSince1970 * 1000]; NSError *error = nil;
   BOOL ok = PatchDocument(@"Threads/ProjectReturn", @{@"status":@"sent_back", @"requestId":requestID, @"project":self.editingProject, @"sentAt":NSDate.date}, &error);
-  [self appendLog:ok ? @"Project sent back" : [NSString stringWithFormat:@"Send back failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
+  if (!ok) [self appendLog:[NSString stringWithFormat:@"Send back failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
   [self backToLog:nil];
 }
 - (void)shareLocalProject:(id)sender {
   [self saveEditingProject]; NSDictionary *project = self.editingProject ?: [self activeLocalProject]; if (!project) return;
   NSString *requestID = [NSString stringWithFormat:@"runner-share-%.0f", NSDate.date.timeIntervalSince1970 * 1000]; NSError *error = nil;
   BOOL ok = PatchDocument(@"Threads/ProjectReturn", @{@"status":@"add_to_projects", @"requestId":requestID, @"project":project, @"sentAt":NSDate.date}, &error);
-  [self appendLog:ok ? @"Add to projects" : [NSString stringWithFormat:@"Share failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
+  if (!ok) [self appendLog:[NSString stringWithFormat:@"Share failed: %@", error.localizedDescription ?: @"Firestore write failed"]];
 }
 - (void)backToLogButton:(id)sender { [self saveEditingProject]; self.editor = nil; self.editingProject = nil; self.editingSharedProject = NO; [self showLog]; }
 - (void)backToLog:(id)sender { [self backToLogButton:sender]; }
