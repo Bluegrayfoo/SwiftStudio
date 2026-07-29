@@ -195,6 +195,7 @@ static void UpdateHistory(NSString *appName) {
   [self button:@"+" frame:NSMakeRect(16,18,36,36) action:@selector(newProject:) blue:YES];
   [self button:@"Open" frame:NSMakeRect(62,18,96,36) action:@selector(openSelectedProject:) blue:YES];
   [self button:@"Rename" frame:NSMakeRect(168,18,130,36) action:@selector(renameProject:) blue:YES];
+  [self redButton:@"Delete" frame:NSMakeRect(308,18,118,36) action:@selector(deleteProject:)];
 }
 - (void)selectProject:(NSButton *)sender { self.activeProjectID = sender.identifier; self.store[@"activeProject"] = self.activeProjectID; [self saveStore]; [self showMain]; }
 - (void)openSelectedProject:(id)sender { self.activeFileID = [self project][@"activeFile"] ?: self.fileIDs.firstObject; [self saveStore]; [self showProject]; }
@@ -208,6 +209,24 @@ static void UpdateHistory(NSString *appName) {
     [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
     [self saveStore]; [self showMain];
   }
+}
+- (void)deleteProject:(id)sender {
+  NSString *name = [self project][@"name"] ?: @"Project";
+  NSAlert *alert = [NSAlert new];
+  alert.messageText = [NSString stringWithFormat:@"Attention: Are you sure you want to delete '%@'?", name];
+  [alert addButtonWithTitle:@"Delete"];
+  [alert addButtonWithTitle:@"Cancel"];
+  if ([alert runModal] != NSAlertFirstButtonReturn) return;
+  [self.store[@"projects"] removeObjectForKey:self.activeProjectID];
+  NSString *next = self.projectIDs.firstObject;
+  if (!next.length) {
+    [self newProject:nil];
+    return;
+  }
+  self.activeProjectID = next;
+  self.store[@"activeProject"] = next;
+  [self saveStore];
+  [self showMain];
 }
 - (void)newProject:(id)sender {
   NSString *pid = [NSString stringWithFormat:@"project-%.0f", NSDate.date.timeIntervalSince1970]; NSString *name = [NSString stringWithFormat:@"MyApp%lu", (unsigned long)self.projectIDs.count + 1];
@@ -271,9 +290,29 @@ static void UpdateHistory(NSString *appName) {
   }
   [self placePreviewContent];
 }
+- (void)editorChangedProgrammatically {
+  [self file][@"code"] = self.editor.string ?: @"";
+  [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
+  [self saveStore];
+  [self applySyntaxHighlighting];
+}
 - (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)replacementString {
-  if (textView != self.editor || ![replacementString isEqualToString:@"\n"]) return YES;
+  if (textView != self.editor) return YES;
   NSString *text = textView.string ?: @"";
+  if ([replacementString isEqualToString:@"}"]) {
+    NSRange lineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
+    NSString *beforeCursor = [text substringWithRange:NSMakeRange(lineRange.location, MIN(range.location, text.length) - lineRange.location)];
+    if ([[beforeCursor stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet] length] == 0 && beforeCursor.length >= 4) {
+      NSUInteger remove = MIN((NSUInteger)4, beforeCursor.length);
+      NSRange replace = NSMakeRange(lineRange.location + beforeCursor.length - remove, remove + range.length);
+      [textView.textStorage replaceCharactersInRange:replace withString:@"}"];
+      [textView setSelectedRange:NSMakeRange(replace.location + 1, 0)];
+      [self editorChangedProgrammatically];
+      return NO;
+    }
+    return YES;
+  }
+  if (![replacementString isEqualToString:@"\n"]) return YES;
   NSRange lineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
   NSString *line = [text substringWithRange:NSMakeRange(lineRange.location, MIN(lineRange.length, text.length - lineRange.location))];
   NSMutableString *indent = [NSMutableString string];
@@ -283,13 +322,24 @@ static void UpdateHistory(NSString *appName) {
   }
   if (range.location > 0 && [[text substringWithRange:NSMakeRange(range.location - 1, 1)] isEqualToString:@"{"]) [indent appendString:@"    "];
   NSString *insert = [@"\n" stringByAppendingString:indent];
-  [textView insertText:insert replacementRange:range];
+  [textView.textStorage replaceCharactersInRange:range withString:insert];
+  [textView setSelectedRange:NSMakeRange(range.location + insert.length, 0)];
+  [self editorChangedProgrammatically];
   return NO;
 }
 - (void)colorPattern:(NSString *)pattern color:(NSColor *)color inString:(NSString *)text {
   NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
   [regex enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
     if (result.range.location != NSNotFound) [self.editor.textStorage addAttribute:NSForegroundColorAttributeName value:color range:result.range];
+  }];
+}
+- (void)colorPattern:(NSString *)pattern capture:(NSUInteger)capture color:(NSColor *)color inString:(NSString *)text {
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  [regex enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    if (capture < result.numberOfRanges) {
+      NSRange r = [result rangeAtIndex:capture];
+      if (r.location != NSNotFound && NSMaxRange(r) <= text.length) [self.editor.textStorage addAttribute:NSForegroundColorAttributeName value:color range:r];
+    }
   }];
 }
 - (void)applySyntaxHighlighting {
@@ -304,12 +354,26 @@ static void UpdateHistory(NSString *appName) {
   NSColor *cyan = [NSColor colorWithCalibratedRed:0.15 green:0.95 blue:1.0 alpha:1.0];
   NSColor *green = [NSColor colorWithCalibratedRed:0.35 green:1.0 blue:0.45 alpha:1.0];
   NSColor *red = [NSColor colorWithCalibratedRed:1.0 green:0.25 blue:0.25 alpha:1.0];
-  [self colorPattern:@"\\b(import|struct|class|enum|protocol|extension|func|var|let|if|else|for|while|return|switch|case|default|private|public|internal|static|@main|some|in|where)\\b" color:pink inString:text];
-  [self colorPattern:@"\\b(Int|Double|Float|String|Bool|Void|View|Scene|App|Color|Image|Font|Binding|State|ObservedObject|EnvironmentObject|CGFloat|NSApplication)\\b" color:blue inString:text];
+  NSColor *orange = [NSColor colorWithCalibratedRed:1.0 green:0.52 blue:0.12 alpha:1.0];
+  [self colorPattern:@"\\b(import|struct|class|enum|protocol|extension|func|var|let|if|else|for|while|return|switch|case|default|private|public|internal|static|some|false|true|nil|in|where)\\b" color:pink inString:text];
+  [self colorPattern:@"#[A-Za-z_][A-Za-z0-9_]*" color:blue inString:text];
+  [self colorPattern:@"#(if|elseif|else|endif)\\b[^\\n]*" color:orange inString:text];
+  [self colorPattern:@"@[A-Za-z_][A-Za-z0-9_]*" color:blue inString:text];
+  [self colorPattern:@"[(,]\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*:" capture:1 color:blue inString:text];
+  [self colorPattern:@"\\.[A-Za-z_][A-Za-z0-9_]*" color:blue inString:text];
+  [self colorPattern:@"\\$[A-Za-z_][A-Za-z0-9_]*" color:green inString:text];
+  NSRegularExpression *vars = [NSRegularExpression regularExpressionWithPattern:@"\\b(var|let)\\s+([A-Za-z_][A-Za-z0-9_]*)" options:0 error:nil];
+  [vars enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    NSRange nameRange = [result rangeAtIndex:2];
+    if (nameRange.location == NSNotFound || NSMaxRange(nameRange) > text.length) return;
+    NSString *name = [text substringWithRange:nameRange];
+    [self colorPattern:[NSString stringWithFormat:@"\\b%@\\b", name] color:green inString:text];
+  }];
+  [self colorPattern:@"\\b([A-Z][A-Za-z0-9_]*)\\s*(?=\\()" capture:1 color:green inString:text];
   [self colorPattern:@"\\b(Text|VStack|HStack|ZStack|List|Button|Image|Spacer|ScrollView|NavigationStack|Form|Section|Toggle|Slider|TextField|Rectangle|RoundedRectangle|Circle|ForEach)\\b" color:blue inString:text];
-  [self colorPattern:@"\\b(struct|class|enum|protocol|func)\\s+([A-Za-z_][A-Za-z0-9_]*)" color:cyan inString:text];
-  [self colorPattern:@"\\b(var|let)\\s+([A-Za-z_][A-Za-z0-9_]*)" color:green inString:text];
-  [self colorPattern:@"\\bstruct\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*:\\s*View\\b" color:green inString:text];
+  [self colorPattern:@"\\b(Int|Double|Float|String|Bool|Void|View|Scene|App|Color|Font|Binding|State|ObservedObject|EnvironmentObject|CGFloat|NSApplication)\\b" color:blue inString:text];
+  [self colorPattern:@"\\b(var|let)\\s+([A-Za-z_][A-Za-z0-9_]*)" capture:2 color:cyan inString:text];
+  [self colorPattern:@"\\b(struct|class|enum|protocol|func)\\s+([A-Za-z_][A-Za-z0-9_]*)" capture:2 color:cyan inString:text];
   [self colorPattern:@"\"([^\"\\\\]|\\\\.)*\"" color:red inString:text];
   [self colorPattern:@"//[^\\n]*" color:green inString:text];
   [self.editor setSelectedRange:NSMakeRange(MIN(selected.location, text.length), MIN(selected.length, text.length - MIN(selected.location, text.length)))];

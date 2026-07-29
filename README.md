@@ -58,6 +58,7 @@ Open the studio:
   - comments: green
   - strings: red
 - Project file renaming from the project screen.
+- Project deletion from the main screen with a confirmation alert.
 - Tuned scrolling for the editor and bottom console.
 - Collapsible fullscreen inline preview pane from the small bottom-left preview button.
 - Fullscreen automatically expands the Studio layout and opens the inline preview pane.
