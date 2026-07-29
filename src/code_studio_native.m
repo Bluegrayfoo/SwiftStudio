@@ -1,6 +1,7 @@
 #import <AppKit/AppKit.h>
 #import <dlfcn.h>
 #import <float.h>
+#import <math.h>
 #import <sys/stat.h>
 
 static NSString *const APIKey = @"AIzaSyDYduyE8CvW-Fm5lBwTsV8JrChA_hjs8Qo";
@@ -76,7 +77,26 @@ static BOOL PatchDocument(NSString *path, NSDictionary *payload, NSError **outEr
   NSInteger status = [(NSHTTPURLResponse *)response statusCode]; if (status < 200 || status >= 300) { if (outError) *outError = [NSError errorWithDomain:@"Firestore" code:status userInfo:@{NSLocalizedDescriptionKey:[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"Firestore write failed"}]; return NO; } return YES;
 }
 
-static void SetPercent(NSString *kind, double value) { PatchDocument([NSString stringWithFormat:@"Percent/%@", kind], @{@"%": @(value)}, nil); }
+static void SetPercent(NSString *kind, double value) {
+  static NSMutableDictionary *lastValues = nil;
+  static NSMutableDictionary *lastTimes = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    lastValues = [NSMutableDictionary dictionary];
+    lastTimes = [NSMutableDictionary dictionary];
+  });
+  @synchronized (lastValues) {
+    NSNumber *lastValueNumber = lastValues[kind];
+    NSDate *lastTime = lastTimes[kind];
+    double lastValue = lastValueNumber ? lastValueNumber.doubleValue : -1000.0;
+    NSTimeInterval age = lastTime ? -lastTime.timeIntervalSinceNow : DBL_MAX;
+    BOOL importantEdge = value <= 1.0 || value >= 100.0 || !lastValueNumber;
+    if (!importantEdge && fabs(value - lastValue) < 5.0 && age < 1.5) return;
+    lastValues[kind] = @(value);
+    lastTimes[kind] = NSDate.date;
+  }
+  PatchDocument([NSString stringWithFormat:@"Percent/%@", kind], @{@"%": @(value)}, nil);
+}
 
 static NSString *ProcessArch(void) {
 #if defined(__x86_64__)
@@ -106,6 +126,7 @@ static void UpdateHistory(NSString *appName) {
 @property NSString *initialThread;
 @property NSMutableArray<NSView *> *dynamicViews;
 @property NSMutableDictionary<NSString *, NSTextField *> *ageLabels;
+@property NSMutableDictionary<NSString *, NSButton *> *projectRows;
 @property NSTextView *editor;
 @property NSTextView *console;
 @property NSMutableString *consoleLog;
@@ -115,6 +136,7 @@ static void UpdateHistory(NSString *appName) {
 @property double lastSendPercent;
 @property double lastCompilePercent;
 @property double lastRunPercent;
+@property NSDate *lastPercentFetchAt;
 @property NSTask *previewTask;
 @property BOOL applyingHighlight;
 @property BOOL previewPaneCollapsed;
@@ -129,7 +151,7 @@ static void UpdateHistory(NSString *appName) {
 @implementation StudioDelegate
 - (NSString *)docsPath { return [@"~/cmds/swift_studio_projects.json" stringByExpandingTildeInPath]; }
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
-  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; self.dynamicViews = [NSMutableArray array]; self.ageLabels = [NSMutableDictionary dictionary]; self.consoleLog = [NSMutableString string]; self.previewPaneCollapsed = YES; self.swiftLogo = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/swiftlogo.png" stringByExpandingTildeInPath]];
+  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; self.dynamicViews = [NSMutableArray array]; self.ageLabels = [NSMutableDictionary dictionary]; self.projectRows = [NSMutableDictionary dictionary]; self.consoleLog = [NSMutableString string]; self.previewPaneCollapsed = YES; self.swiftLogo = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/swiftlogo.png" stringByExpandingTildeInPath]];
   [self loadStore]; [self buildWindow]; [self showMain]; UpdateHistory(@"SwiftStudio"); [NSApp activateIgnoringOtherApps:YES];
   [NSTimer scheduledTimerWithTimeInterval:30 target:self selector:@selector(refreshAgeLabels:) userInfo:nil repeats:YES];
   [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(updatePreviewPlacement:) userInfo:nil repeats:YES];
@@ -195,19 +217,30 @@ static void UpdateHistory(NSString *appName) {
   }
 }
 - (void)showMain {
-  self.showingProject = NO; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self label:@"SwiftStudio" frame:NSMakeRect(0,680,1176,72) font:TitleFont(48) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter; [self addLine:NSMakeRect(0,665,1176,2)];
+  self.showingProject = NO; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects]; [self label:@"SwiftStudio" frame:NSMakeRect(0,680,1176,72) font:TitleFont(48) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter; [self addLine:NSMakeRect(0,665,1176,2)];
   CGFloat y = 580; for (NSString *pid in self.projectIDs) {
     NSDictionary *p = self.store[@"projects"][pid]; BOOL selected = [pid isEqualToString:self.activeProjectID]; NSButton *row = [self button:@"" frame:NSMakeRect(8,y,1160,64) action:@selector(selectProject:) blue:NO]; row.identifier = pid; row.layer.backgroundColor = (selected ? Blue() : DarkRow()).CGColor; row.layer.cornerRadius = 16;
+    self.projectRows[pid] = row;
     [self label:p[@"name"] frame:NSMakeRect(26,y+13,360,42) font:TitleFont(39) color:NSColor.whiteColor];
     NSTextField *age = [self label:[self relativeAge:p[@"updatedAt"]] frame:NSMakeRect(390,y+22,160,26) font:TitleFont(20) color:NSColor.lightGrayColor];
-    self.ageLabels[pid] = age; y -= 88;
+    self.ageLabels[pid] = age;
+    NSButton *hit = [self button:@"" frame:row.frame action:@selector(selectProject:) blue:NO];
+    hit.identifier = pid;
+    hit.layer.backgroundColor = NSColor.clearColor.CGColor;
+    hit.layer.opacity = 0.01;
+    y -= 88;
   }
   [self button:@"+" frame:NSMakeRect(16,18,36,36) action:@selector(newProject:) blue:YES];
   [self button:@"Open" frame:NSMakeRect(62,18,96,36) action:@selector(openSelectedProject:) blue:YES];
   [self button:@"Rename" frame:NSMakeRect(168,18,130,36) action:@selector(renameProject:) blue:YES];
   [self redButton:@"Delete" frame:NSMakeRect(308,18,118,36) action:@selector(deleteProject:)];
 }
-- (void)selectProject:(NSButton *)sender { self.activeProjectID = sender.identifier; self.store[@"activeProject"] = self.activeProjectID; [self saveStore]; [self showMain]; }
+- (void)selectProject:(NSButton *)sender {
+  self.activeProjectID = sender.identifier;
+  self.store[@"activeProject"] = self.activeProjectID;
+  for (NSString *pid in self.projectRows) self.projectRows[pid].layer.backgroundColor = ([pid isEqualToString:self.activeProjectID] ? Blue() : DarkRow()).CGColor;
+  [self saveStore];
+}
 - (void)openSelectedProject:(id)sender { self.activeFileID = [self project][@"activeFile"] ?: self.fileIDs.firstObject; [self saveStore]; [self showProject]; }
 - (void)renameProject:(id)sender {
   NSAlert *alert = [NSAlert new]; alert.messageText = @"Rename project";
@@ -328,18 +361,24 @@ static void UpdateHistory(NSString *appName) {
         [self editorChangedProgrammatically];
         return NO;
       }
-      NSRange nextLineRange = [updated lineRangeForRange:NSMakeRange(nextLineStart, 0)];
-      if (nextLineRange.location == nextLineStart && nextLineRange.location < updated.length) {
-        NSString *nextLine = [updated substringWithRange:NSMakeRange(nextLineRange.location, MIN(nextLineRange.length, updated.length - nextLineRange.location))];
-        NSString *trimmed = [nextLine stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if (trimmed.length && ![trimmed hasPrefix:@"}"]) {
-          NSUInteger existingIndentLength = 0;
-          while (existingIndentLength < nextLine.length) {
-            unichar c = [nextLine characterAtIndex:existingIndentLength];
-            if (c == ' ' || c == '\t') existingIndentLength++; else break;
-          }
-          [textView.textStorage replaceCharactersInRange:NSMakeRange(nextLineRange.location, existingIndentLength) withString:targetIndent];
+      NSUInteger scan = nextLineStart;
+      NSUInteger sourceIndentLength = NSNotFound;
+      while (scan < textView.string.length) {
+        NSString *currentText = textView.string ?: @"";
+        NSRange lineRange = [currentText lineRangeForRange:NSMakeRange(scan, 0)];
+        NSString *lineText = [currentText substringWithRange:NSMakeRange(lineRange.location, MIN(lineRange.length, currentText.length - lineRange.location))];
+        NSString *trimmed = [lineText stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!trimmed.length) { scan = NSMaxRange(lineRange); continue; }
+        if ([trimmed hasPrefix:@"}"]) break;
+        NSUInteger existingIndentLength = 0;
+        while (existingIndentLength < lineText.length) {
+          unichar c = [lineText characterAtIndex:existingIndentLength];
+          if (c == ' ' || c == '\t') existingIndentLength++; else break;
         }
+        if (sourceIndentLength == NSNotFound) sourceIndentLength = existingIndentLength;
+        if (existingIndentLength != sourceIndentLength) break;
+        [textView.textStorage replaceCharactersInRange:NSMakeRange(lineRange.location, existingIndentLength) withString:targetIndent];
+        scan = lineRange.location + targetIndent.length + (lineRange.length - existingIndentLength);
       }
     }
     [textView setSelectedRange:NSMakeRange(cursor, 0)];
@@ -531,6 +570,7 @@ static void UpdateHistory(NSString *appName) {
   for (NSInteger i = 0; i < chunkCount; i++) [chunks addObject:[NSNull null]];
   __block NSString *downloadError = nil;
   __block NSInteger completedChunks = 0;
+  __block double lastDownloadReported = 50.0;
   dispatch_group_t group = dispatch_group_create();
   for (NSInteger i = 0; i < chunkCount; i++) {
     dispatch_group_enter(group);
@@ -538,6 +578,7 @@ static void UpdateHistory(NSString *appName) {
       NSError *error = nil;
       NSString *chunkPath = [NSString stringWithFormat:@"Threads/%@/Compiled/%@-%04ld", thread, requestID, (long)i];
       NSDictionary *chunk = GetDocument(chunkPath, &error);
+      __block BOOL shouldRefresh = NO;
       @synchronized (chunks) {
         if (error && !downloadError) downloadError = error.localizedDescription;
         NSString *data = chunk[@"data"];
@@ -545,9 +586,14 @@ static void UpdateHistory(NSString *appName) {
         if (data.length) chunks[(NSUInteger)i] = data;
         completedChunks++;
         double downloadProgress = 45.0 + (((double)completedChunks) / MAX(1.0, (double)chunkCount)) * 20.0;
-        SetPercent(@"Run", MAX(50.0, downloadProgress));
+        double next = MAX(50.0, downloadProgress);
+        if (next - lastDownloadReported >= 5.0 || completedChunks == chunkCount) {
+          lastDownloadReported = next;
+          SetPercent(@"Run", next);
+          shouldRefresh = YES;
+        }
       }
-      dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
+      if (shouldRefresh) dispatch_async(dispatch_get_main_queue(), ^{ [self refreshConsole:nil]; });
       dispatch_group_leave(group);
     });
   }
@@ -632,37 +678,43 @@ static void UpdateHistory(NSString *appName) {
 - (void)refreshConsole:(id)sender {
   if (!self.console) return;
   if (!self.pendingRequestID) { self.console.string = self.consoleLog ?: @""; [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)]; return; }
-  double send = [GetDocument(@"Percent/Send", nil)[@"%"] doubleValue]; double compile = [GetDocument(@"Percent/Compile", nil)[@"%"] doubleValue]; double run = [GetDocument(@"Percent/Run", nil)[@"%"] doubleValue];
-  self.lastSendPercent = MAX(self.lastSendPercent, send);
-  self.lastCompilePercent = MAX(self.lastCompilePercent, compile);
-  self.lastRunPercent = MAX(self.lastRunPercent, run);
-  send = self.lastSendPercent;
-  compile = self.lastCompilePercent;
-  run = self.lastRunPercent;
+  NSTimeInterval age = self.lastPercentFetchAt ? -self.lastPercentFetchAt.timeIntervalSinceNow : DBL_MAX;
+  if (age >= 1.25) {
+    double send = [GetDocument(@"Percent/Send", nil)[@"%"] doubleValue];
+    double compile = [GetDocument(@"Percent/Compile", nil)[@"%"] doubleValue];
+    double run = [GetDocument(@"Percent/Run", nil)[@"%"] doubleValue];
+    self.lastSendPercent = MAX(self.lastSendPercent, send);
+    self.lastCompilePercent = MAX(self.lastCompilePercent, compile);
+    self.lastRunPercent = MAX(self.lastRunPercent, run);
+    self.lastPercentFetchAt = NSDate.date;
+  }
+  double send = self.lastSendPercent;
+  double compile = self.lastCompilePercent;
+  double run = self.lastRunPercent;
   NSMutableString *text = [NSMutableString stringWithFormat:@"Sending...%@ %.0f%%\nCompiling...%@ %.0f%%\nRunning...%@ %.0f%%\n", [self bar:send], send, [self bar:compile], compile, [self bar:run], run];
   [text appendString:self.consoleLog ?: @""];
   self.console.string = text;
   [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)];
 }
 - (void)sendForPreview:(id)sender {
-  [self saveEditor]; self.consoleLog = [NSMutableString string]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); SetPercent(@"Run", 0); [self refreshConsole:nil];
+  [self saveEditor]; self.consoleLog = [NSMutableString string]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 5; self.lastCompilePercent = 0; self.lastRunPercent = 0; self.lastPercentFetchAt = NSDate.date; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); SetPercent(@"Run", 0); [self refreshConsole:nil];
   NSDictionary *p = [self project]; NSError *error = nil;
-  SetPercent(@"Send", 35);
+  self.lastSendPercent = 35; SetPercent(@"Send", 35);
   NSString *source = [self combinedSource];
-  SetPercent(@"Send", 70);
+  self.lastSendPercent = 70; SetPercent(@"Send", 70);
   BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"previewArch":ProcessArch(), @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date, @"compiledRequestId":@"", @"compiledChunkCount":@0, @"compiledSize":@0}, &error);
-  SetPercent(@"Send", ok ? 100 : 0); [self refreshConsole:nil]; if (!ok) { [self appendConsole:[NSString stringWithFormat:@"Send failed: %@", error.localizedDescription]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
-  [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
+  self.lastSendPercent = ok ? 100 : 0; SetPercent(@"Send", ok ? 100 : 0); [self refreshConsole:nil]; if (!ok) { [self appendConsole:[NSString stringWithFormat:@"Send failed: %@", error.localizedDescription]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
+  [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 - (void)checkPreview:(id)sender {
   NSDictionary *doc = GetDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], nil); [self refreshConsole:nil];
-  if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
+  if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
   NSString *status = doc[@"status"] ?: @""; if ([status isEqualToString:@"complete"] || [status isEqualToString:@"error"]) {
     if ([status isEqualToString:@"complete"]) {
       NSString *compiledRequestID = doc[@"compiledRequestId"];
       NSNumber *compiledChunkCount = doc[@"compiledChunkCount"];
       if (![compiledRequestID isEqualToString:self.pendingRequestID] || compiledChunkCount.integerValue <= 0) {
-        [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
+        [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
         return;
       }
       if (self.openingPreview) return;
@@ -691,7 +743,7 @@ static void UpdateHistory(NSString *appName) {
       if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
     }
     if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; [self refreshConsole:nil]; return; }
-  [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
+  [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 @end
 

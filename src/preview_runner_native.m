@@ -1,4 +1,6 @@
 #import <Foundation/Foundation.h>
+#import <float.h>
+#import <math.h>
 
 static NSString *const APIKey = @"AIzaSyDYduyE8CvW-Fm5lBwTsV8JrChA_hjs8Qo";
 static NSString *const ProjectID = @"bytehelper-c7794";
@@ -96,6 +98,23 @@ static BOOL PatchDocument(NSString *path, NSDictionary *payload, NSError **outEr
 }
 
 static void SetPercent(NSString *kind, double value) {
+  static NSMutableDictionary *lastValues = nil;
+  static NSMutableDictionary *lastTimes = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    lastValues = [NSMutableDictionary dictionary];
+    lastTimes = [NSMutableDictionary dictionary];
+  });
+  @synchronized (lastValues) {
+    NSNumber *lastValueNumber = lastValues[kind];
+    NSDate *lastTime = lastTimes[kind];
+    double lastValue = lastValueNumber ? lastValueNumber.doubleValue : -1000.0;
+    NSTimeInterval age = lastTime ? -lastTime.timeIntervalSinceNow : DBL_MAX;
+    BOOL importantEdge = value <= 1.0 || value >= 100.0 || !lastValueNumber;
+    if (!importantEdge && fabs(value - lastValue) < 5.0 && age < 1.5) return;
+    lastValues[kind] = @(value);
+    lastTimes[kind] = NSDate.date;
+  }
   PatchDocument([NSString stringWithFormat:@"Percent/%@", kind], @{@"%": @(value)}, nil);
 }
 
@@ -285,7 +304,7 @@ int main(int argc, const char *argv[]) {
         SetPercent(@"Compile", 1);
         SetPercent(@"Run", 0);
         PatchDocument([NSString stringWithFormat:@"Threads/%@", thread], @{@"status": @"running", @"startedAt": NSDate.date}, nil);
-        NSDictionary *result = CompileExecutable(source, requestID, remote[@"previewArch"] ?: @"arm64");
+        NSDictionary *result = CompileExecutable(source, requestID, remote[@"previewArch"] ?: @"");
         BOOL ok = [result[@"ok"] boolValue];
         NSDictionary *compiledMetadata = @{};
         if (ok) {
@@ -300,7 +319,7 @@ int main(int argc, const char *argv[]) {
         if (ok) UpdateHistory(appName);
         printf("%s: %s\n", thread.UTF8String, ok ? "complete" : "error");
       }
-      [NSThread sleepForTimeInterval:0.5];
+      [NSThread sleepForTimeInterval:2.0];
     }
   }
 }
