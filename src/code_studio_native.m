@@ -309,6 +309,43 @@ static void UpdateHistory(NSString *appName) {
 - (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)replacementString {
   if (textView != self.editor) return YES;
   NSString *text = textView.string ?: @"";
+  if ([replacementString isEqualToString:@"{"]) {
+    NSRange currentLineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
+    NSString *currentLine = [text substringWithRange:NSMakeRange(currentLineRange.location, MIN(currentLineRange.length, text.length - currentLineRange.location))];
+    NSMutableString *targetIndent = [NSMutableString string];
+    for (NSUInteger i = 0; i < currentLine.length; i++) {
+      unichar c = [currentLine characterAtIndex:i];
+      if (c == ' ' || c == '\t') [targetIndent appendFormat:@"%C", c]; else break;
+    }
+    [targetIndent appendString:@"    "];
+    [textView.textStorage replaceCharactersInRange:range withString:@"{"];
+    NSUInteger cursor = range.location + 1;
+    NSString *updated = textView.string ?: @"";
+    if (cursor < updated.length && [updated characterAtIndex:cursor] == '\n') {
+      NSUInteger nextLineStart = cursor + 1;
+      if (nextLineStart >= updated.length) {
+        [textView setSelectedRange:NSMakeRange(cursor, 0)];
+        [self editorChangedProgrammatically];
+        return NO;
+      }
+      NSRange nextLineRange = [updated lineRangeForRange:NSMakeRange(nextLineStart, 0)];
+      if (nextLineRange.location == nextLineStart && nextLineRange.location < updated.length) {
+        NSString *nextLine = [updated substringWithRange:NSMakeRange(nextLineRange.location, MIN(nextLineRange.length, updated.length - nextLineRange.location))];
+        NSString *trimmed = [nextLine stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (trimmed.length && ![trimmed hasPrefix:@"}"]) {
+          NSUInteger existingIndentLength = 0;
+          while (existingIndentLength < nextLine.length) {
+            unichar c = [nextLine characterAtIndex:existingIndentLength];
+            if (c == ' ' || c == '\t') existingIndentLength++; else break;
+          }
+          [textView.textStorage replaceCharactersInRange:NSMakeRange(nextLineRange.location, existingIndentLength) withString:targetIndent];
+        }
+      }
+    }
+    [textView setSelectedRange:NSMakeRange(cursor, 0)];
+    [self editorChangedProgrammatically];
+    return NO;
+  }
   if ([replacementString isEqualToString:@"}"]) {
     NSRange lineRange = [text lineRangeForRange:NSMakeRange(MIN(range.location, text.length), 0)];
     NSString *beforeCursor = [text substringWithRange:NSMakeRange(lineRange.location, MIN(range.location, text.length) - lineRange.location)];
