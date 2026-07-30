@@ -15,16 +15,23 @@ mkdir -p "$WORK_DIR/src" "$WORK_DIR/fishy_syntax/Sources/FishySyntax" "$INSTALL_
 
 if [[ -f "$SCRIPT_DIR/src/preview_runner_native.m" ]]; then
   cp "$SCRIPT_DIR/src/preview_runner_native.m" "$WORK_DIR/src/preview_runner_native.m"
+  if [[ -f "$SCRIPT_DIR/src/fishy_errors.csv" ]]; then
+    cp "$SCRIPT_DIR/src/fishy_errors.csv" "$WORK_DIR/src/fishy_errors.csv"
+  fi
   if [[ -f "$SCRIPT_DIR/src/fishy_syntax/Sources/FishySyntax/main.swift" ]]; then
     cp "$SCRIPT_DIR/src/fishy_syntax/Sources/FishySyntax/main.swift" "$WORK_DIR/fishy_syntax/Sources/FishySyntax/main.swift"
   fi
 else
   curl -fsSL "$REPO_RAW/src/preview_runner_native.m" -o "$WORK_DIR/src/preview_runner_native.m"
+  curl -fsSL "$REPO_RAW/src/fishy_errors.csv" -o "$WORK_DIR/src/fishy_errors.csv" || true
   curl -fsSL "$REPO_RAW/src/fishy_syntax/Sources/FishySyntax/main.swift" -o "$WORK_DIR/fishy_syntax/Sources/FishySyntax/main.swift" || true
 fi
 
 clang -fobjc-arc -framework AppKit "$WORK_DIR/src/preview_runner_native.m" -o "$INSTALL_DIR/preview_runner"
 chmod +x "$INSTALL_DIR/preview_runner"
+if [[ -f "$WORK_DIR/src/fishy_errors.csv" ]]; then
+  cp "$WORK_DIR/src/fishy_errors.csv" "$INSTALL_DIR/fishy_errors.csv"
+fi
 
 if [[ -f "$WORK_DIR/fishy_syntax/Sources/FishySyntax/main.swift" && -d "$HOME/fishytool/swift-syntax" ]]; then
   FISHY_CACHE_ROOT="$HOME/fishytool/fishy_syntax_helper"
@@ -73,6 +80,10 @@ echo "  $INSTALL_DIR/preview_runner"
 if [[ -x "$INSTALL_DIR/fishy_syntax" ]]; then
   echo "Installed Fishy SwiftSyntax helper:"
   echo "  $INSTALL_DIR/fishy_syntax"
+fi
+if [[ -f "$INSTALL_DIR/fishy_errors.csv" ]]; then
+  echo "Installed Fishy error knowledge:"
+  echo "  $INSTALL_DIR/fishy_errors.csv"
 fi
 echo
 echo "Run:"

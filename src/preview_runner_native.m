@@ -27,6 +27,11 @@ static id FirestoreValue(id value) {
     for (NSString *key in value) fields[key] = FirestoreValue(value[key]);
     return @{@"mapValue": @{@"fields": fields}};
   }
+  if ([value isKindOfClass:[NSArray class]]) {
+    NSMutableArray *values = [NSMutableArray array];
+    for (id item in (NSArray *)value) [values addObject:FirestoreValue(item)];
+    return @{@"arrayValue": @{@"values": values}};
+  }
   return @{@"stringValue": [value description]};
 }
 
@@ -40,6 +45,14 @@ static id NativeValue(NSDictionary *value) {
     NSMutableDictionary *out = [NSMutableDictionary dictionary];
     NSDictionary *fields = value[@"mapValue"][@"fields"] ?: @{};
     for (NSString *key in fields) out[key] = NativeValue(fields[key]);
+    return out;
+  }
+  if (value[@"arrayValue"]) {
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSDictionary *item in value[@"arrayValue"][@"values"] ?: @[]) {
+      id native = NativeValue(item);
+      if (native) [out addObject:native];
+    }
     return out;
   }
   return nil;
@@ -258,6 +271,87 @@ static BOOL ContainsRegex(NSString *text, NSString *pattern) {
   return [regex firstMatchInString:text ?: @"" options:0 range:NSMakeRange(0, (text ?: @"").length)] != nil;
 }
 
+static NSArray<NSString *> *FishyCSVFields(NSString *line) {
+  NSMutableArray<NSString *> *fields = [NSMutableArray array];
+  NSMutableString *field = [NSMutableString string];
+  BOOL quoted = NO;
+  for (NSUInteger i = 0; i < line.length; i++) {
+    unichar c = [line characterAtIndex:i];
+    unichar next = i + 1 < line.length ? [line characterAtIndex:i + 1] : 0;
+    if (c == '"') {
+      if (quoted && next == '"') { [field appendString:@"\""]; i++; }
+      else quoted = !quoted;
+    } else if (c == ',' && !quoted) {
+      [fields addObject:[field copy]];
+      [field setString:@""];
+    } else {
+      [field appendFormat:@"%C", c];
+    }
+  }
+  [fields addObject:[field copy]];
+  return fields;
+}
+
+static NSArray<NSDictionary *> *FishyErrorRows(void) {
+  static NSArray<NSDictionary *> *rows = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    NSString *path = [@"~/cmds/fishy_errors.csv" stringByExpandingTildeInPath];
+    NSString *csv = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
+    NSMutableArray *loaded = [NSMutableArray array];
+    NSArray *lines = [csv componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
+    for (NSUInteger i = 1; i < lines.count; i++) {
+      NSString *line = lines[i];
+      if (!line.length) continue;
+      NSArray<NSString *> *f = FishyCSVFields(line);
+      if (f.count < 6) continue;
+      [loaded addObject:@{@"category":f[0], @"error":f[1], @"meaning":f[2], @"fix":f[3], @"causes":f[4], @"checklist":f[5]}];
+    }
+    rows = [loaded copy];
+  });
+  return rows ?: @[];
+}
+
+static BOOL FishyErrorRowMatches(NSDictionary *row, NSString *text) {
+  NSString *lower = (text ?: @"").lowercaseString;
+  NSString *error = [row[@"error"] ?: @"" lowercaseString];
+  if (!error.length || !lower.length) return NO;
+  if ([lower containsString:error]) return YES;
+  if ([error hasPrefix:@"expected '"]) {
+    NSRange first = [error rangeOfString:@"'"];
+    NSRange second = [error rangeOfString:@"'" options:0 range:NSMakeRange(NSMaxRange(first), error.length - NSMaxRange(first))];
+    if (first.location != NSNotFound && second.location != NSNotFound) {
+      NSString *token = [error substringWithRange:NSMakeRange(NSMaxRange(first), second.location - NSMaxRange(first))];
+      return [lower containsString:@"expected"] && [lower containsString:token];
+    }
+  }
+  NSString *withoutPlaceholder = [[error stringByReplacingOccurrencesOfString:@"'x'" withString:@""] stringByReplacingOccurrencesOfString:@" x " withString:@" "];
+  withoutPlaceholder = [withoutPlaceholder stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (withoutPlaceholder.length >= 8 && [lower containsString:withoutPlaceholder]) return YES;
+  NSArray *parts = [error componentsSeparatedByString:@"x"];
+  NSString *prefix = parts.count ? [parts.firstObject stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
+  return prefix.length >= 8 && [lower containsString:prefix];
+}
+
+static NSString *FishyKnowledgeForText(NSString *text, NSUInteger limit) {
+  NSMutableArray<NSString *> *tips = [NSMutableArray array];
+  NSMutableSet<NSString *> *seen = [NSMutableSet set];
+  for (NSDictionary *row in FishyErrorRows()) {
+    if (![row isKindOfClass:NSDictionary.class] || !FishyErrorRowMatches(row, text)) continue;
+    NSString *key = row[@"error"] ?: @"";
+    if ([seen containsObject:key]) continue;
+    [seen addObject:key];
+    NSString *meaning = row[@"meaning"] ?: @"";
+    NSString *fix = row[@"fix"] ?: @"";
+    NSString *category = row[@"category"] ?: @"";
+    [tips addObject:[NSString stringWithFormat:@"%@: %@ %@", category, meaning, fix]];
+    if (tips.count >= limit) break;
+  }
+  return [tips componentsJoinedByString:@"\n- "];
+}
+
+static NSDictionary *FishyTypecheckSource(NSString *source);
+
 static NSString *RunFishySyntaxSummary(NSString *source) {
   NSString *helper = [@"~/cmds/fishy_syntax" stringByExpandingTildeInPath];
   if (![NSFileManager.defaultManager isExecutableFileAtPath:helper]) return @"";
@@ -288,6 +382,11 @@ static NSString *FishySuggestionsForSource(NSString *source, NSString *fileName)
   NSMutableArray<NSString *> *tips = [NSMutableArray array];
   NSString *syntax = RunFishySyntaxSummary(source);
   if (syntax.length) [tips addObject:syntax];
+  NSDictionary *typecheck = FishyTypecheckSource(source);
+  NSString *typecheckOutput = typecheck[@"output"] ?: @"";
+  NSString *knowledgeText = [NSString stringWithFormat:@"%@\n%@", syntax ?: @"", typecheckOutput];
+  NSString *knowledge = FishyKnowledgeForText(knowledgeText, 4);
+  if (knowledge.length) [tips addObject:[@"Fishy error guide:\n- " stringByAppendingString:knowledge]];
   if ([source containsString:@"!"]) [tips addObject:@"Avoid force-unwraps when optional binding or a default value would work."];
   if (ContainsRegex(source, @"while\\s+(true|1)\\b")) [tips addObject:@"Avoid while true loops unless they have a clear cancellation path."];
   NSArray *lines = [source componentsSeparatedByString:@"\n"];
@@ -310,7 +409,641 @@ static NSString *FishySuggestionsForSource(NSString *source, NSString *fileName)
     }
   }
   if (!tips.count) [tips addObject:@"No major style or efficiency issues jumped out."];
-  return [NSString stringWithFormat:@"🐠: Suggestions for %@\n- %@", fileName ?: @"ContentView", [tips componentsJoinedByString:@"\n- "]];
+  return [NSString stringWithFormat:@"🐠: Suggestions for %@:\n- %@", fileName ?: @"ContentView", [tips componentsJoinedByString:@"\n- "]];
+}
+
+static NSDictionary *FishyTypecheckSource(NSString *source) {
+  NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-fish-typecheck-%@", NSUUID.UUID.UUIDString]];
+  [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+  NSString *path = [dir stringByAppendingPathComponent:@"ContentView.swift"];
+  [source writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+  NSTask *task = [NSTask new];
+  task.launchPath = @"/usr/bin/xcrun";
+  task.arguments = @[@"swiftc", @"-typecheck", path];
+  NSPipe *pipe = [NSPipe pipe];
+  task.standardOutput = pipe;
+  task.standardError = pipe;
+  @try {
+    [task launch];
+    [task waitUntilExit];
+  } @catch (NSException *exception) {
+    [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
+    return @{@"ok": @NO, @"errors": @999, @"output": @"Could not run swiftc for Fishy typecheck."};
+  }
+  NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+  [NSFileManager.defaultManager removeItemAtPath:dir error:nil];
+  NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+  NSUInteger errors = 0;
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"\\berror:" options:0 error:nil];
+  errors = [regex numberOfMatchesInString:output options:0 range:NSMakeRange(0, output.length)];
+  return @{@"ok": @(task.terminationStatus == 0), @"errors": @(errors), @"output": output};
+}
+
+static NSInteger FishyCountChar(NSString *text, unichar needle) {
+  NSInteger count = 0;
+  for (NSUInteger i = 0; i < text.length; i++) if ([text characterAtIndex:i] == needle) count++;
+  return count;
+}
+
+static NSString *FishyReplaceToken(NSString *line, NSString *wrong, NSString *right, NSMutableArray<NSString *> *actions) {
+  NSString *pattern = [NSString stringWithFormat:@"(?<![A-Za-z0-9_])%@(?![A-Za-z0-9_])", [NSRegularExpression escapedPatternForString:wrong]];
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  NSString *next = [regex stringByReplacingMatchesInString:line options:0 range:NSMakeRange(0, line.length) withTemplate:right];
+  if (![next isEqualToString:line]) [actions addObject:[NSString stringWithFormat:@"changed %@ to %@", wrong, right]];
+  return next;
+}
+
+static NSString *FishyReplaceCommonTypos(NSString *line, NSMutableArray<NSString *> *actions) {
+  NSDictionary *map = @{
+    @"ilmport": @"import", @"improt": @"import", @"SwfitUI": @"SwiftUI", @"SwiftUIL": @"SwiftUI", @"SwilftUI": @"SwiftUI", @"SwLiuftUI": @"SwiftUI", @"SwLuftUI": @"SwiftUI", @"Foundatione": @"Foundation",
+    @"clas": @"class", @"vaer": @"var", @"letvar": @"var", @"Bokol": @"Bool", @"faelse": @"false", @"ture": @"true", @"Vaew": @"View", @"Veiw": @"View",
+    @"CounterModle": @"CounterModel", @"Publised": @"Published", @"StateObect": @"StateObject", @"titel": @"title", @"addone": @"addOne",
+    @"Spate": @"State", @"Sdate": @"State", @"spate": @"State", @"sdate": @"State",
+    @"systeemName": @"systemName", @"systemname": @"systemName", @"foregroundstyle": @"foregroundStyle", @"foregreundStyle": @"foregroundStyle", @"feurgrondStile": @"foregroundStyle", @"feurgrondStyle": @"foregroundStyle", @"feurgondStyle": @"foregroundStyle", @"feurgoundStyle": @"foregroundStyle", @"foregondStyle": @"foregroundStyle", @"foregroundStlye": @"foregroundStyle",
+    @"tit": @"tint", @"bnack": @"black", @"brack": @"black", @"blak": @"black", @"toggsle": @"toggle", @"Pneview": @"Preview", @"Previen": @"Preview", @"Preveew": @"Preview", @"preveew": @"Preview",
+    @"CondentView": @"ContentView", @"KontentVeen": @"ContentView", @"KontentView": @"ContentView", @"SontentVeew": @"ContentView", @"SontentView": @"ContentView", @"ContentVeew": @"ContentView", @"ContentViewsssss": @"ContentView", @"prinnt": @"print"
+  };
+  NSString *next = line;
+  for (NSString *wrong in map) next = FishyReplaceToken(next, wrong, map[wrong], actions);
+  return next;
+}
+
+static BOOL FishyLineIsOnlyCloseBrace(NSString *line) {
+  NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  return [trimmed isEqualToString:@"}"];
+}
+
+static BOOL FishyLineStartsTopLevelStatement(NSString *trimmed) {
+  if (!trimmed.length || [trimmed hasPrefix:@"//"]) return NO;
+  if ([trimmed hasPrefix:@"print("] || [trimmed hasPrefix:@"if "] || [trimmed hasPrefix:@"for "] || [trimmed hasPrefix:@"while "] || [trimmed hasPrefix:@"repeat "]) return YES;
+  if ([trimmed hasSuffix:@"()"] && ![trimmed hasPrefix:@"func "] && ![trimmed hasPrefix:@"init("] && ![trimmed hasPrefix:@"super."]) return YES;
+  if (ContainsRegex(trimmed, @"^[A-Za-z_][A-Za-z0-9_\\.]*\\s*=\\s*[^=]")) return YES;
+  if (ContainsRegex(trimmed, @"^[A-Za-z_][A-Za-z0-9_\\.]*\\.append\\(")) return YES;
+  if (ContainsRegex(trimmed, @"^[A-Za-z_][A-Za-z0-9_\\.]*\\.remove\\(")) return YES;
+  return NO;
+}
+
+static NSString *FishySafePass(NSString *source, NSMutableArray<NSString *> *actions) {
+  NSMutableArray<NSString *> *lines = [[source componentsSeparatedByString:@"\n"] mutableCopy];
+  BOOL hasContentView = [source containsString:@"ContentView"];
+  BOOL needsPreviewView = !hasContentView && ([source containsString:@"print("] || [source containsString:@"struct "] || [source containsString:@"class "]);
+  NSInteger depth = 0;
+  NSInteger topLevelCommentBlockDepth = 0;
+  NSInteger structLevelCommentBlockDepth = 0;
+  for (NSUInteger i = 0; i < lines.count; i++) {
+    NSString *line = lines[i];
+    NSString *original = line;
+    NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    NSInteger depthBefore = depth;
+    if (structLevelCommentBlockDepth > 0) {
+      NSInteger delta = FishyCountChar(line, '{') - FishyCountChar(line, '}');
+      if (![trimmed hasPrefix:@"//"]) {
+        line = [@"// " stringByAppendingString:line];
+        [actions addObject:@"commented out the rest of a misplaced view block in a struct"];
+      }
+      lines[i] = line;
+      structLevelCommentBlockDepth += delta;
+      if (structLevelCommentBlockDepth <= 0) structLevelCommentBlockDepth = 0;
+      continue;
+    }
+    if (topLevelCommentBlockDepth > 0) {
+      NSInteger delta = FishyCountChar(line, '{') - FishyCountChar(line, '}');
+      if (![trimmed hasPrefix:@"//"]) {
+        line = [@"// " stringByAppendingString:line];
+        [actions addObject:@"commented out the rest of a top-level executable block"];
+      }
+      lines[i] = line;
+      topLevelCommentBlockDepth += delta;
+      if (topLevelCommentBlockDepth <= 0) topLevelCommentBlockDepth = 0;
+      continue;
+    }
+    line = FishyReplaceCommonTypos(line, actions);
+    trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if ([trimmed hasPrefix:@"//"] && [trimmed containsString:@"#Preview"]) {
+      NSRange comment = [line rangeOfString:@"//"];
+      if (comment.location != NSNotFound) {
+        line = [[line substringToIndex:comment.location] stringByAppendingString:[[line substringFromIndex:NSMaxRange(comment)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]];
+        [actions addObject:@"restored a commented #Preview macro"];
+        trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+      }
+    }
+    if (depthBefore == 1 && ([trimmed hasPrefix:@"HStack {"] || [trimmed hasPrefix:@"VStack {"] || [trimmed hasPrefix:@"ZStack {"] || [trimmed hasPrefix:@"Text("] || [trimmed hasPrefix:@"Image("] || [trimmed hasPrefix:@"Button("])) {
+      NSInteger delta = FishyCountChar(line, '{') - FishyCountChar(line, '}');
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out view code that was outside body"];
+      lines[i] = line;
+      if (delta > 0) structLevelCommentBlockDepth = delta;
+      continue;
+    }
+    if (depthBefore == 0 && FishyLineStartsTopLevelStatement(trimmed)) {
+      NSInteger delta = FishyCountChar(line, '{') - FishyCountChar(line, '}');
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out a top-level executable statement for preview compilation"];
+      lines[i] = line;
+      if (delta > 0) topLevelCommentBlockDepth = delta;
+      continue;
+    }
+    if ([trimmed isEqualToString:@"import Swift"]) {
+      line = @"";
+      [actions addObject:@"removed import Swift because Swift itself is not an importable module"];
+    } else if ([trimmed isEqualToString:@"import SwiftUI"] && ![source containsString:@"View"] && ![source containsString:@"SwiftUI"]) {
+      line = @"";
+      [actions addObject:@"removed an unused SwiftUI import"];
+    } else if ([trimmed isEqualToString:@"import Swfit"] || [trimmed isEqualToString:@"import SwiftUIL"] || [trimmed isEqualToString:@"import SwilftUI"] || [trimmed isEqualToString:@"import SwfitUI"]) {
+      NSRange r = [line rangeOfString:@"import "];
+      NSString *leading = r.location == NSNotFound ? @"" : [line substringToIndex:r.location];
+      line = [leading stringByAppendingString:@"import SwiftUI"];
+      [actions addObject:@"fixed a misspelled SwiftUI import"];
+    } else if ([trimmed isEqualToString:@"import Foundatione"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"Foundatione" withString:@"Foundation"];
+      [actions addObject:@"fixed a misspelled Foundation import"];
+    } else if ([trimmed isEqualToString:@"import UIKit"]) {
+      line = @"";
+      [actions addObject:@"removed UIKit import because this runner typechecks on macOS"];
+    }
+    if ([trimmed hasPrefix:@"clas "]) {
+      NSRange r = [line rangeOfString:@"clas "];
+      if (r.location != NSNotFound) {
+        line = [line stringByReplacingCharactersInRange:r withString:@"class "];
+        [actions addObject:@"changed clas to class"];
+      }
+    }
+    if (([trimmed hasPrefix:@"struct "] || [trimmed hasPrefix:@"class "] || [trimmed hasPrefix:@"enum "] || [trimmed hasPrefix:@"protocol "] || [trimmed hasPrefix:@"extension "]) && ![trimmed containsString:@"{"] && ![trimmed hasSuffix:@"}"]) {
+      line = [line stringByAppendingString:@" {"];
+      [actions addObject:@"added an opening brace to an incomplete type declaration"];
+    }
+    if ([line containsString:@"<T: Int>"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"<T: Int>" withString:@"<T>"];
+      [actions addObject:@"removed an invalid generic constraint to Int"];
+    }
+    if ([line containsString:@" where T: Banana"]) {
+      line = [line stringByReplacingOccurrencesOfString:@" where T: Banana" withString:@""];
+      [actions addObject:@"removed an unresolved generic where constraint"];
+    }
+    if ([trimmed isEqualToString:@"let constant"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let constant" withString:@"let constant = 0"];
+      [actions addObject:@"gave an uninitialized constant a default value"];
+    }
+    if ([line containsString:@"var number: String = 100"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"var number: String = 100" withString:@"var number: Int = 100"];
+      [actions addObject:@"made number's type match its integer value"];
+    }
+    if ([line containsString:@"let age: String = 42"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let age: String = 42" withString:@"let age: Int = 42"];
+      [actions addObject:@"made age's type match its integer value"];
+    }
+    if ([line containsString:@"return \"Hi, my name is \" + name + \" and I am \" + age + \" years old\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return \"Hi, my name is \" + name + \" and I am \" + age + \" years old\"" withString:@"return \"Hi, my name is \\(name) and I am \\(age) years old\""];
+      [actions addObject:@"changed String plus Int concatenation into interpolation"];
+    }
+    if ([line containsString:@"age = age + \"1\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"age = age + \"1\"" withString:@"age += 1"];
+      [actions addObject:@"made birthday add an Int"];
+    }
+    if ([line containsString:@"var name = 123"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"var name = 123" withString:@"var name = \"Name\""];
+      [actions addObject:@"made name a String so greeting text works"];
+    }
+    if ([trimmed isEqualToString:@"}}"] && [source containsString:@"func reset()"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"}}" withString:@"}"];
+      [actions addObject:@"removed an extra closing brace before reset"];
+    }
+    if (([trimmed hasPrefix:@"init("] || [trimmed hasPrefix:@"func "]) && [line containsString:@"{"]) {
+      NSRange brace = [line rangeOfString:@"{" options:NSBackwardsSearch];
+      NSRange closeParenBeforeBrace = [line rangeOfString:@")" options:NSBackwardsSearch range:NSMakeRange(0, brace.location)];
+      if (brace.location != NSNotFound && closeParenBeforeBrace.location == NSNotFound) {
+        line = [line stringByReplacingCharactersInRange:brace withString:@") {"];
+        [actions addObject:@"closed a function or initializer parameter list before the opening brace"];
+      }
+    }
+    if ([trimmed hasPrefix:@"func "] && [trimmed hasSuffix:@"("]) {
+      line = [line stringByAppendingString:@") {"];
+      [actions addObject:@"closed an unfinished function declaration"];
+    }
+    if ([trimmed hasPrefix:@"func "] && ![trimmed containsString:@"{"] && ![trimmed hasSuffix:@"}"]) {
+      NSInteger opens = FishyCountChar(line, '('), closes = FishyCountChar(line, ')');
+      while (opens > closes) { line = [line stringByAppendingString:@")"]; closes++; }
+      if (![line hasSuffix:@" {"]) line = [line stringByAppendingString:@" {"];
+      [actions addObject:@"completed an unfinished function declaration"];
+    }
+    if ([trimmed hasPrefix:@"func "] && [trimmed hasSuffix:@"{"] && ![trimmed containsString:@"("]) {
+      NSRange brace = [line rangeOfString:@"{" options:NSBackwardsSearch];
+      line = [line stringByReplacingCharactersInRange:brace withString:@"() {"];
+      [actions addObject:@"added missing parentheses to a function declaration"];
+    }
+    NSRegularExpression *missingParamColon = [NSRegularExpression regularExpressionWithPattern:@"\\bfunc\\s+([A-Za-z_][A-Za-z0-9_]*)\\(([^:(),]+)\\s+(Int|String|Double|Bool|Float)\\b" options:0 error:nil];
+    NSTextCheckingResult *paramMatch = [missingParamColon firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+    if (paramMatch && [paramMatch rangeAtIndex:2].location != NSNotFound) {
+      NSRange nameRange = [paramMatch rangeAtIndex:2];
+      line = [line stringByReplacingCharactersInRange:nameRange withString:[NSString stringWithFormat:@"%@:", [line substringWithRange:nameRange]]];
+      [actions addObject:@"added a missing colon in a function parameter"];
+    }
+    if ([trimmed hasPrefix:@"} until "]) {
+      line = [line stringByReplacingOccurrencesOfString:@"} until " withString:@"} while "];
+      [actions addObject:@"changed repeat-until to Swift repeat-while syntax"];
+    } else if ([trimmed hasPrefix:@"until "]) {
+      NSRange r = [line rangeOfString:@"until "];
+      if (r.location != NSNotFound) {
+        line = [line stringByReplacingCharactersInRange:r withString:@"while "];
+        [actions addObject:@"changed repeat-until to Swift repeat-while syntax"];
+      }
+    }
+    if ([trimmed hasPrefix:@"case >"]) {
+      NSRange r = [line rangeOfString:@"case >"];
+      if (r.location != NSNotFound) {
+        NSString *rest = [[line substringFromIndex:NSMaxRange(r)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        line = [[line substringToIndex:r.location] stringByAppendingFormat:@"case let value where value > %@", rest];
+        [actions addObject:@"changed a comparison switch case into a where-pattern case"];
+      }
+    }
+    if ([trimmed isEqualToString:@"default"]) {
+      line = [line stringByAppendingString:@":"];
+      [actions addObject:@"added the missing colon after default"];
+    }
+    if ([trimmed hasPrefix:@"case "] && [trimmed hasSuffix:@"="]) {
+      line = [line substringToIndex:line.length - 1];
+      [actions addObject:@"removed an incomplete enum case assignment"];
+    }
+    if ([line containsString:@"prinnt("]) {
+      line = [line stringByReplacingOccurrencesOfString:@"prinnt(" withString:@"print("];
+      [actions addObject:@"changed prinnt to print"];
+    }
+    if ([trimmed isEqualToString:@"super.init()"]) {
+      line = @"";
+      [actions addObject:@"removed super.init() from a class without a superclass initializer requirement"];
+    }
+    if ([line containsString:@"return x * y * \"banana\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return x * y * \"banana\"" withString:@"return Double(x * y)"];
+      [actions addObject:@"returned a Double from calculate instead of multiplying by a String"];
+    }
+    if ([line containsString:@"return a + b"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return a + b" withString:@"return String(Double(a) + b)"];
+      [actions addObject:@"made add return a String from compatible numeric operands"];
+    }
+    if ([line containsString:@"return number1 + number2"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return number1 + number2" withString:@"return String(number1 + number2)"];
+      [actions addObject:@"made addNumbers return a String"];
+    }
+    if ([line containsString:@"return self * 2"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return self * 2" withString:@"return String(self * 2)"];
+      [actions addObject:@"made doubled return a String"];
+    }
+    if ([line containsString:@"return a + b"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return a + b" withString:@"return false"];
+      [actions addObject:@"removed invalid closure addition between different types"];
+    }
+    if ([line containsString:@"return \"Hello\""] && [source containsString:@"-> Int"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return \"Hello\"" withString:@"return 0"];
+      [actions addObject:@"returned an Int from an Int function"];
+    }
+    if ([trimmed isEqualToString:@"return 42"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"return 42" withString:@"return true"];
+      [actions addObject:@"returned Bool from a Bool function"];
+    }
+    if ([line containsString:@"throw \"Error!\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"throw \"Error!\"" withString:@"throw NSError(domain: \"Fishy\", code: 1)"];
+      [actions addObject:@"changed thrown String into an Error value"];
+    }
+    if ([line containsString:@"var value: Int = nil"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"var value: Int = nil" withString:@"var value: String = \"\""];
+      [actions addObject:@"made value's type match later String assignment"];
+    }
+    if ([line containsString:@"mutating func mutate() -> String"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"mutating func mutate() -> String" withString:@"mutating func mutate()"];
+      [actions addObject:@"removed an unused return type from mutate"];
+    }
+    if ([line containsString:@"value = \"hello\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"value = \"hello\"" withString:@"value = 0"];
+      [actions addObject:@"made value assignment match its Int type"];
+    }
+    if ([line containsString:@"static override func"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"static override func" withString:@"static func"];
+      [actions addObject:@"removed invalid static override"];
+    }
+    if ([trimmed hasPrefix:@"enum "] && [line containsString:@": Flyable"]) {
+      line = [line stringByReplacingOccurrencesOfString:@": Flyable" withString:@""];
+      [actions addObject:@"removed protocol conformance from enum with missing requirements"];
+    }
+    if ([trimmed hasPrefix:@"extension String: Int"]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out an invalid extension inheritance clause"];
+    }
+    if ([trimmed hasPrefix:@"extension "] && [line containsString:@": Int"]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out an extension that tried to inherit from Int"];
+    }
+    if ([line containsString:@"let pi: Int = 3.14159"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let pi: Int = 3.14159" withString:@"let pi: Double = 3.14159"];
+      [actions addObject:@"made pi a Double"];
+    }
+    if ([trimmed hasPrefix:@"let names = ["]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let names =" withString:@"var names ="];
+      [actions addObject:@"made names mutable because append is used later"];
+    }
+    if ([trimmed hasPrefix:@"let array = ["]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let array =" withString:@"var array ="];
+      [actions addObject:@"made array mutable because it is edited later"];
+    }
+    if ([line containsString:@"names.append(123)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"names.append(123)" withString:@"names.append(\"123\")"];
+      [actions addObject:@"made appended name a String"];
+    }
+    if ([line containsString:@"array.append(\"four\")"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"array.append(\"four\")" withString:@"array.append(4)"];
+      [actions addObject:@"made appended array value an Int"];
+    }
+    if ([line containsString:@"array.remove(at: \"zero\")"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"array.remove(at: \"zero\")" withString:@"array.remove(at: 0)"];
+      [actions addObject:@"made array removal index an Int"];
+    }
+    if ([line containsString:@"let dictionary: [String: Int] = []"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let dictionary: [String: Int] = []" withString:@"var dictionary: [String: Int] = [:]"];
+      [actions addObject:@"made dictionary mutable and initialized it as a dictionary"];
+    }
+    if ([trimmed hasPrefix:@"dictionary["] && ![source containsString:@"dictionary:"]) {
+      line = [@"var dictionary: [String: Int] = [:]\n" stringByAppendingString:line];
+      [actions addObject:@"declared a dictionary before using it"];
+    }
+    if ([line containsString:@"print(i * 2)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"print(i * 2)" withString:@"print(i)"];
+      [actions addObject:@"removed invalid Character multiplication"];
+    }
+    if ([trimmed hasPrefix:@"if let "] && [trimmed containsString:@" = 10"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"if let x = 10 {" withString:@"let x = 10\nif true {"];
+      [actions addObject:@"changed conditional binding on a non-optional into a normal let"];
+    }
+    if ([line containsString:@"print(tuple.language)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"print(tuple.language)" withString:@"print(tuple.name)"];
+      [actions addObject:@"used an existing tuple label"];
+    }
+    if ([line containsString:@"let x: Int = \"hello\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let x: Int = \"hello\"" withString:@"let x: Int = 0"];
+      [actions addObject:@"made x's value match its Int type"];
+    }
+    if ([line containsString:@"let person1 = person(name: \"Sam\", age: \"20\")"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let person1 = person(name: \"Sam\", age: \"20\")" withString:@"let person1 = person(name: \"Sam\", age: 20)"];
+      [actions addObject:@"made person age argument an Int"];
+    }
+    if ([line containsString:@"print(person1.introduce)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"print(person1.introduce)" withString:@"print(person1.introduce())"];
+      [actions addObject:@"called introduce instead of passing the method"];
+    }
+    if ([line containsString:@"var people: [person] = person1"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"var people: [person] = person1" withString:@"var people: [person] = [person1]"];
+      [actions addObject:@"initialized people as an array"];
+    }
+    if ([line containsString:@"people.append(\"Alex\")"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"people.append(\"Alex\")" withString:@"people.append(person(name: \"Alex\", age: 0))"];
+      [actions addObject:@"appended a person value to people"];
+    }
+    if ([line containsString:@"let result = addNumbers(5, \"10\")"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let result = addNumbers(5, \"10\")" withString:@"let result = addNumbers(number1: 5, number2: 10)"];
+      [actions addObject:@"fixed addNumbers labels and argument types"];
+    }
+    if ([line containsString:@"if result {"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"if result {" withString:@"if !result.isEmpty {"];
+      [actions addObject:@"made the String result into a Bool condition"];
+    }
+    if ([line containsString:@"optionalName.uppercased()"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"optionalName.uppercased()" withString:@"optionalName?.uppercased() ?? \"\""];
+      [actions addObject:@"safely unwrapped optionalName"];
+    }
+    if ([line containsString:@"print(numbers[number])"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"print(numbers[number])" withString:@"print(number)"];
+      [actions addObject:@"used the loop value instead of indexing with it"];
+    }
+    if ([line containsString:@"struct Dog: Animal"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"struct Dog: Animal" withString:@"class Dog: Animal"];
+      [actions addObject:@"made Dog a class so it can inherit from Animal"];
+    }
+    if ([line containsString:@"let x = 10"] && [source containsString:@"x = 20"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let x = 10" withString:@"var x = 10"];
+      [actions addObject:@"made x mutable because it is reassigned"];
+    }
+    if ([line containsString:@"unknownFunction()"]) {
+      if (![trimmed hasPrefix:@"//"]) {
+        line = [@"// " stringByAppendingString:line];
+        [actions addObject:@"commented out an unresolved function call"];
+      }
+    }
+    if ([line containsString:@"Text(\"This should not be here\")"]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out a View expression inside a Button action"];
+    }
+    if ([line containsString:@"let z = x + \"world\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"let z = x + \"world\"" withString:@"let z = \"\\(x)world\""];
+      [actions addObject:@"made mixed Int/String addition into interpolation"];
+    }
+    if ([line containsString:@"optional + 1"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"optional + 1" withString:@"(optional ?? 0) + 1"];
+      [actions addObject:@"safely unwrapped an optional before adding"];
+    }
+    if ([line containsString:@"print(tuple.5)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"print(tuple.5)" withString:@"print(tuple.1)"];
+      [actions addObject:@"used an existing tuple position"];
+    }
+    if ([line containsString:@"case green(123)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"case green(123)" withString:@"case green"];
+      [actions addObject:@"removed an invalid enum case payload literal"];
+    }
+    if ([line containsString:@"case blue ="]) {
+      line = [line stringByReplacingOccurrencesOfString:@"case blue =" withString:@"case blue"];
+      [actions addObject:@"removed an incomplete enum raw value"];
+    }
+    if ([line containsString:@"func run()"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"func run()" withString:@"func run(speed: Int)"];
+      [actions addObject:@"matched the Runner protocol method signature"];
+    }
+    if ([line containsString:@"override func speak(sound: String)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"override func speak(sound: String)" withString:@"func speak(sound: String)"];
+      [actions addObject:@"removed override from a method with no matching superclass method"];
+    }
+    if ([line containsString:@"func fly()"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"func fly()" withString:@"func fly(height: Int)"];
+      [actions addObject:@"matched the Flyable protocol method signature"];
+    }
+    if ([line containsString:@"final func hello()"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"final func hello()" withString:@"func hello()"];
+      [actions addObject:@"removed final so the subclass override can compile"];
+    }
+    if ([line containsString:@"@available(iOS banana, *)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"@available(iOS banana, *)" withString:@"@available(iOS 13.0, *)"];
+      [actions addObject:@"made the availability version numeric"];
+    }
+    if ([line containsString:@"Person(name: true"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"Person(name: true" withString:@"Person(name: \"Name\""];
+      [actions addObject:@"made Person name argument a String"];
+    }
+    if ([line containsString:@"ContentView(s)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"ContentView(s)" withString:@"ContentView()"];
+      [actions addObject:@"removed an extra argument from ContentView preview"];
+    }
+    if ([line containsString:@"age: \"old\""]) {
+      line = [line stringByReplacingOccurrencesOfString:@"age: \"old\"" withString:@"age: 0"];
+      [actions addObject:@"made Person age argument an Int"];
+    }
+    if ([line containsString:@"undefinedThing"] || [line containsString:@"anotherUndefinedThing"]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out unresolved placeholder identifiers"];
+    }
+    if ([trimmed isEqualToString:@"@objc"]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out @objc before a Swift struct"];
+    }
+    if ([trimmed hasPrefix:@"#warning("] && ![trimmed containsString:@"\""]) {
+      NSRange open = [line rangeOfString:@"#warning("];
+      NSRange close = [line rangeOfString:@")" options:NSBackwardsSearch];
+      if (open.location != NSNotFound && close.location != NSNotFound && close.location > NSMaxRange(open)) {
+        NSString *value = [line substringWithRange:NSMakeRange(NSMaxRange(open), close.location - NSMaxRange(open))];
+        line = [NSString stringWithFormat:@"%@#warning(\"%@\")", [line substringToIndex:open.location], value];
+        [actions addObject:@"made #warning use a String literal"];
+      }
+    }
+    if ([trimmed hasPrefix:@"if "] && [trimmed containsString:@" = "] && ![trimmed containsString:@" == "] && ![trimmed containsString:@"let "]) {
+      line = [line stringByReplacingOccurrencesOfString:@" = " withString:@" == "];
+      [actions addObject:@"changed assignment in an if condition to equality comparison"];
+    }
+    if ([trimmed hasPrefix:@"guard "] && ![source containsString:@"func "]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out a guard statement at file scope"];
+    }
+    if ([trimmed hasPrefix:@"for "] && ![trimmed hasSuffix:@"{"]) {
+      line = [line stringByAppendingString:@" {"];
+      [actions addObject:@"added an opening brace to a for loop"];
+    }
+    if ([trimmed isEqualToString:@"continue continue"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"continue continue" withString:@"continue"];
+      [actions addObject:@"removed a duplicate continue keyword"];
+    }
+    if (([trimmed hasPrefix:@"print("] || [trimmed hasSuffix:@"("] || [trimmed containsString:@".foregroundStyle("] || [trimmed containsString:@".background("] || [trimmed containsString:@".font("] || [trimmed containsString:@".frame("] || [trimmed containsString:@".padding("] || [trimmed containsString:@".imageScale("]) && FishyCountChar(line, '(') > FishyCountChar(line, ')') && ![trimmed hasPrefix:@"func "]) {
+      line = [line stringByAppendingString:@")"];
+      [actions addObject:@"closed an unfinished function call"];
+    }
+    if ([line containsString:@"Text(\""] && FishyCountChar(line, '"') % 2 == 1) {
+      line = [line stringByAppendingString:@"\")"];
+      [actions addObject:@"closed an unfinished Text string"];
+    }
+    if ([line containsString:@"Image("] && FishyCountChar(line, '(') > FishyCountChar(line, ')')) {
+      line = [line stringByAppendingString:@")"];
+      [actions addObject:@"closed an unfinished Image call"];
+    }
+    if ([line containsString:@"Toggle("] && FishyCountChar(line, '(') > FishyCountChar(line, ')')) {
+      line = [line stringByAppendingString:@")"];
+      [actions addObject:@"closed an unfinished Toggle call"];
+    }
+    if ([line containsString:@".imageScale.large)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@".imageScale.large)" withString:@".imageScale(.large)"];
+      [actions addObject:@"made imageScale a normal SwiftUI modifier call"];
+    }
+    if ([trimmed isEqualToString:@"padding()"]) {
+      NSRange r = [line rangeOfString:@"padding()"];
+      line = [[line substringToIndex:r.location] stringByAppendingString:@".padding()"];
+      [actions addObject:@"added the missing dot before padding"];
+    }
+    if ([trimmed isEqualToString:@".padding"]) {
+      line = [line stringByAppendingString:@"()"];
+      [actions addObject:@"called padding with parentheses"];
+    }
+    if (FishyCountChar(line, '[') > FishyCountChar(line, ']')) {
+      line = [line stringByAppendingString:@"]"];
+      [actions addObject:@"closed an unfinished bracketed expression"];
+    }
+    if ([trimmed hasPrefix:@"#"] && ![trimmed hasPrefix:@"#if"] && ![trimmed hasPrefix:@"#else"] && ![trimmed hasPrefix:@"#elseif"] && ![trimmed hasPrefix:@"#endif"] && ![trimmed hasPrefix:@"#Preview"] && ![trimmed hasPrefix:@"#warning"] && ![trimmed hasPrefix:@"#available"]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out an unknown compiler directive"];
+    }
+    if ([trimmed containsString:@"???"] || [trimmed containsString:@"<<<"] || [trimmed containsString:@">>>"]) {
+      line = [@"// " stringByAppendingString:line];
+      [actions addObject:@"commented out invalid placeholder tokens"];
+    }
+    if (![line isEqualToString:original]) lines[i] = line;
+    depth += FishyCountChar(line, '{') - FishyCountChar(line, '}');
+  }
+  NSString *joinedBeforePreview = [lines componentsJoinedByString:@"\n"];
+  if (needsPreviewView && ![joinedBeforePreview containsString:@"ContentView"]) {
+    if (![joinedBeforePreview containsString:@"import SwiftUI"]) {
+      NSUInteger insertIndex = 0;
+      while (insertIndex < lines.count) {
+        NSString *t = [lines[insertIndex] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (![t hasPrefix:@"import "]) break;
+        insertIndex++;
+      }
+      [lines insertObject:@"import SwiftUI" atIndex:insertIndex];
+      [actions addObject:@"imported SwiftUI for the generated preview view"];
+    }
+    [lines addObject:@""];
+    [lines addObject:@"struct ContentView: View {"];
+    [lines addObject:@"    var body: some View {"];
+    [lines addObject:@"        Text(\"Preview ready\")"];
+    [lines addObject:@"    }"];
+    [lines addObject:@"}"];
+    [actions addObject:@"added a small ContentView so the preview runner has a view to host"];
+  }
+  NSInteger braceBalance = 0;
+  for (NSString *line in lines) {
+    braceBalance += FishyCountChar(line, '{') - FishyCountChar(line, '}');
+  }
+  while (braceBalance < 0) {
+    BOOL removed = NO;
+    for (NSInteger i = (NSInteger)lines.count - 1; i >= 0; i--) {
+      if (FishyLineIsOnlyCloseBrace(lines[(NSUInteger)i])) {
+        [lines removeObjectAtIndex:(NSUInteger)i];
+        braceBalance++;
+        removed = YES;
+        [actions addObject:@"removed an extra closing brace"];
+        break;
+      }
+    }
+    if (!removed) break;
+  }
+  while (braceBalance > 0) {
+    [lines addObject:@"}"];
+    braceBalance--;
+    [actions addObject:@"added a missing closing brace at the end of the file"];
+  }
+  return [lines componentsJoinedByString:@"\n"];
+}
+
+static NSString *FishySafeImplementedSource(NSString *source, NSString **summaryOut, BOOL *shouldApplyOut) {
+  NSMutableArray<NSString *> *actions = [NSMutableArray array];
+  NSString *current = source ?: @"";
+  NSDictionary *bestCheck = FishyTypecheckSource(current);
+  NSString *best = current;
+  NSNumber *startingErrors = bestCheck[@"errors"] ?: @0;
+  for (NSUInteger pass = 0; pass < 8; pass++) {
+    NSMutableArray<NSString *> *passActions = [NSMutableArray array];
+    NSString *candidate = FishySafePass(best, passActions);
+    if ([candidate isEqualToString:best]) break;
+    NSDictionary *candidateCheck = FishyTypecheckSource(candidate);
+    NSInteger oldErrors = [bestCheck[@"errors"] integerValue];
+    NSInteger newErrors = [candidateCheck[@"errors"] integerValue];
+    BOOL improves = [candidateCheck[@"ok"] boolValue] || newErrors < oldErrors || passActions.count;
+    if (!improves) break;
+    best = candidate;
+    bestCheck = candidateCheck;
+    [actions addObjectsFromArray:passActions];
+    if ([bestCheck[@"ok"] boolValue]) break;
+  }
+  NSString *candidate = best;
+  NSString *syntax = RunFishySyntaxSummary(candidate);
+  NSDictionary *beforeCheck = FishyTypecheckSource(source);
+  NSDictionary *afterCheck = bestCheck;
+  NSString *afterOutput = afterCheck[@"output"] ?: @"";
+  NSString *knowledgeText = [NSString stringWithFormat:@"%@\n%@", syntax ?: @"", afterOutput];
+  NSString *knowledge = FishyKnowledgeForText(knowledgeText, 3);
+  BOOL changed = ![candidate isEqualToString:source];
+  BOOL improved = [afterCheck[@"ok"] boolValue] || ([afterCheck[@"errors"] integerValue] < [beforeCheck[@"errors"] integerValue]);
+  BOOL notWorse = [afterCheck[@"ok"] boolValue] || ([afterCheck[@"errors"] integerValue] <= [beforeCheck[@"errors"] integerValue]);
+  if (shouldApplyOut) *shouldApplyOut = changed;
+  if (summaryOut) {
+    if (changed && improved && [afterCheck[@"ok"] boolValue]) *summaryOut = [NSString stringWithFormat:@"Runner used the CSV guide, repeated safe fixes, and got the file compiling. Safe edits: %@.", [actions componentsJoinedByString:@", "]];
+    else if (changed && improved) *summaryOut = [NSString stringWithFormat:@"Runner used the CSV guide and reduced compiler errors from %@ to %@. Safe edits: %@.", startingErrors, afterCheck[@"errors"], [actions componentsJoinedByString:@", "]];
+    else if (changed && notWorse) *summaryOut = [NSString stringWithFormat:@"Runner applied CSV-guided repairs; the remaining compiler count stayed at %@. Safe edits: %@.%@", afterCheck[@"errors"], [actions componentsJoinedByString:@", "], knowledge.length ? [NSString stringWithFormat:@"\nFishy error guide:\n- %@", knowledge] : @""];
+    else if (changed) *summaryOut = [NSString stringWithFormat:@"Runner applied CSV-guided repairs and revealed deeper compiler errors (%@ before, %@ after). Safe edits: %@.%@", beforeCheck[@"errors"], afterCheck[@"errors"], [actions componentsJoinedByString:@", "], knowledge.length ? [NSString stringWithFormat:@"\nFishy error guide:\n- %@", knowledge] : @""];
+    else if (syntax.length || knowledge.length) *summaryOut = [NSString stringWithFormat:@"Runner could not safely edit this yet. %@%@", syntax.length ? syntax : @"", knowledge.length ? [NSString stringWithFormat:@"\nFishy error guide:\n- %@", knowledge] : @""];
+    else *summaryOut = @"Runner could not safely edit this yet; no CSV-guided fix matched the current compiler output.";
+  }
+  return candidate;
 }
 
 static NSDictionary *UploadExecutableChunks(NSString *thread, NSString *requestID, NSString *exePath, NSString *exeName, NSError **outError) {
@@ -371,6 +1104,16 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
 @property BOOL runnerNoticeRed;
 @property NSString *screenMode;
 @property NSString *lastFishRequestID;
+@property NSArray *chatMessages;
+@property NSString *lastChatSignature;
+@property NSString *chatReturnMode;
+@property NSTextView *chatInput;
+@property NSTextView *chatCodeInput;
+@property NSString *chatDraftText;
+@property NSString *chatDraftCode;
+@property BOOL chatComposerHasCode;
+@property NSView *chatTranscriptView;
+@property NSTextField *chatPlaceholder;
 @end
 
 @implementation RunnerDelegate
@@ -387,6 +1130,7 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   UpdateHistory(@"Preview Runner");
   [self appendLog:[NSString stringWithFormat:@"Watching %@", [self.threads componentsJoinedByString:@", "]]];
   [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(checkProjectShare:) userInfo:nil repeats:YES];
+  [NSTimer scheduledTimerWithTimeInterval:2.0 target:self selector:@selector(refreshChatIfOpen:) userInfo:nil repeats:YES];
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ [self watchThreads]; });
   [NSApp activateIgnoringOtherApps:YES];
 }
@@ -473,12 +1217,156 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   self.screenMode = @"log"; [self clearDynamic]; self.editor = nil; NSRect b = self.root.bounds;
   [self label:@"Preview Runner" frame:NSMakeRect(0,b.size.height-78,b.size.width,60) font:TitleFont(42) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter;
   [self button:@"Enter studio" frame:NSMakeRect(18,b.size.height-62,170,42) action:@selector(enterStudio:) blue:YES];
+  [self button:@"Chat" frame:NSMakeRect(200,b.size.height-62,100,42) action:@selector(showChatPage) blue:YES];
   [self addLine:NSMakeRect(0,b.size.height-86,b.size.width,2)];
   NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(18,18,b.size.width-36,b.size.height-170)];
   scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; scroll.hasVerticalScroller = YES; scroll.autohidesScrollers = NO; scroll.verticalLineScroll = 10; scroll.verticalPageScroll = 80; scroll.wantsLayer = YES; scroll.layer.backgroundColor = NSColor.blackColor.CGColor;
   self.logView = [[NSTextView alloc] initWithFrame:scroll.bounds]; self.logView.font = MonoFont(18); self.logView.textColor = NSColor.whiteColor; self.logView.backgroundColor = NSColor.blackColor; self.logView.editable = NO; self.logView.string = self.logText ?: @"";
   scroll.documentView = self.logView; [self.dynamicViews addObject:scroll]; [self.root addSubview:scroll];
   [self addSharedProjectNoticeIfNeeded];
+}
+- (NSArray *)loadChatMessages {
+  NSError *error = nil;
+  NSDictionary *doc = GetDocument(@"Threads/Chat", &error);
+  return [doc[@"messages"] isKindOfClass:[NSArray class]] ? doc[@"messages"] : @[];
+}
+- (void)saveChatMessageText:(NSString *)text code:(NSString *)code {
+  NSString *body = text ?: @"";
+  if (!body.length && !code.length) return;
+  NSMutableArray *messages = [[self loadChatMessages] mutableCopy];
+  NSString *messageID = [NSString stringWithFormat:@"runner-chat-%.0f", NSDate.date.timeIntervalSince1970 * 1000];
+  NSMutableDictionary *message = [@{@"id":messageID, @"sender":@"runner", @"text":body, @"sentAt":NSDate.date} mutableCopy];
+  if (code.length) message[@"code"] = code;
+  [messages addObject:message];
+  while (messages.count > 80) [messages removeObjectAtIndex:0];
+  PatchDocument(@"Threads/Chat", @{@"messages":messages, @"updatedAt":NSDate.date}, nil);
+  self.chatMessages = messages;
+}
+- (void)addChatBubble:(NSDictionary *)message y:(CGFloat *)y maxWidth:(CGFloat)maxWidth {
+  BOOL mine = [message[@"sender"] isEqualToString:@"runner"];
+  NSString *text = message[@"text"] ?: @"";
+  NSString *code = message[@"code"] ?: @"";
+  CGFloat bubbleW = MIN(520, maxWidth * 0.58);
+  CGFloat x = mine ? maxWidth - bubbleW - 26 : 26;
+  CGFloat codeH = code.length ? 92 : 0;
+  CGFloat textH = MAX(34, MIN(110, 24 + ceil(text.length / 31.0) * 24));
+  CGFloat h = textH + codeH + 20;
+  NSView *card = [[NSView alloc] initWithFrame:NSMakeRect(x, *y - h, bubbleW, h)];
+  card.wantsLayer = YES;
+  card.layer.backgroundColor = (mine ? Blue() : [NSColor colorWithCalibratedWhite:0.58 alpha:1.0]).CGColor;
+  card.layer.cornerRadius = 16;
+  NSTextField *body = [[NSTextField alloc] initWithFrame:NSMakeRect(16, h - textH - 8, bubbleW - 32, textH)];
+  body.stringValue = text.length ? text : @"Code";
+  body.font = TitleFont(19); body.textColor = NSColor.whiteColor; body.bezeled = NO; body.drawsBackground = NO; body.editable = NO; body.selectable = NO;
+  [card addSubview:body];
+  if (code.length) {
+    NSView *codeBox = [[NSView alloc] initWithFrame:NSMakeRect(16, 16, bubbleW - 32, 76)];
+    codeBox.wantsLayer = YES; codeBox.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.35 alpha:1.0].CGColor; codeBox.layer.cornerRadius = 12;
+    NSTextField *header = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 47, bubbleW - 64, 22)];
+    header.stringValue = @"</>  Swift"; header.font = MonoFont(16); header.textColor = [NSColor colorWithCalibratedWhite:0.78 alpha:1.0]; header.bezeled = NO; header.drawsBackground = NO; header.editable = NO; header.selectable = NO;
+    [codeBox addSubview:header];
+    NSBox *line = [[NSBox alloc] initWithFrame:NSMakeRect(0, 44, bubbleW - 32, 2)]; line.boxType = NSBoxCustom; line.borderColor = [NSColor colorWithCalibratedWhite:0.78 alpha:1.0]; line.fillColor = [NSColor colorWithCalibratedWhite:0.78 alpha:1.0]; [codeBox addSubview:line];
+    NSString *snippet = code.length > 42 ? [[code substringToIndex:42] stringByAppendingString:@"..."] : code;
+    NSTextField *snippetField = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 12, bubbleW - 64, 24)];
+    snippetField.stringValue = [[snippet componentsSeparatedByString:@"\n"] firstObject] ?: @"some code"; snippetField.font = MonoFont(15); snippetField.textColor = NSColor.whiteColor; snippetField.bezeled = NO; snippetField.drawsBackground = NO; snippetField.editable = NO; snippetField.selectable = NO;
+    [codeBox addSubview:snippetField];
+    [card addSubview:codeBox];
+  }
+  if (self.chatTranscriptView) {
+    [self.chatTranscriptView addSubview:card];
+  } else {
+    [self.dynamicViews addObject:card];
+    [self.root addSubview:card];
+  }
+  *y -= h + 18;
+}
+- (void)showChatPage {
+  if (![self.screenMode isEqualToString:@"chat"]) self.chatReturnMode = self.screenMode ?: @"log";
+  self.screenMode = @"chat";
+  [self saveEditingProject];
+  [self clearDynamic];
+  self.editor = nil;
+  NSRect b = self.root.bounds;
+  self.chatMessages = [self loadChatMessages];
+  [self button:@"<" frame:NSMakeRect(18,b.size.height-88,54,54) action:@selector(closeChatPage:) blue:YES];
+  [self label:@"Chat" frame:NSMakeRect(92,b.size.height-92,250,68) font:TitleFont(46) color:NSColor.whiteColor];
+  CGFloat composerH = self.chatComposerHasCode ? 178 : 56;
+  CGFloat transcriptY = composerH + 86;
+  CGFloat transcriptH = MAX(120, b.size.height - transcriptY - 130);
+  CGFloat transcriptW = b.size.width - 36;
+  NSScrollView *transcriptScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(18, transcriptY, transcriptW, transcriptH)];
+  [self tuneScrollView:transcriptScroll];
+  transcriptScroll.drawsBackground = NO;
+  transcriptScroll.borderType = NSNoBorder;
+  CGFloat docH = MAX(transcriptH, 24 + self.chatMessages.count * 150);
+  self.chatTranscriptView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, transcriptW, docH)];
+  self.chatTranscriptView.wantsLayer = YES;
+  self.chatTranscriptView.layer.backgroundColor = NSColor.blackColor.CGColor;
+  transcriptScroll.documentView = self.chatTranscriptView;
+  [self.dynamicViews addObject:transcriptScroll];
+  [self.root addSubview:transcriptScroll];
+  CGFloat y = docH - 18;
+  for (NSDictionary *message in self.chatMessages) [self addChatBubble:message y:&y maxWidth:transcriptW];
+  [transcriptScroll.contentView scrollToPoint:NSMakePoint(0, 0)];
+  [self button:@"</> Code box" frame:NSMakeRect(18,composerH+34,170,38) action:@selector(addChatCodeBox:) blue:YES];
+  NSView *input = [[NSView alloc] initWithFrame:NSMakeRect(18,18,b.size.width-100,composerH)];
+  input.wantsLayer = YES; input.layer.backgroundColor = NSColor.blackColor.CGColor; input.layer.cornerRadius = 18; input.layer.borderColor = NSColor.whiteColor.CGColor; input.layer.borderWidth = 2;
+  NSScrollView *messageScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(18, self.chatComposerHasCode ? composerH - 60 : 8, input.frame.size.width - 36, 44)];
+  messageScroll.borderType = NSNoBorder; messageScroll.hasVerticalScroller = NO; messageScroll.drawsBackground = NO;
+  self.chatInput = [[NSTextView alloc] initWithFrame:messageScroll.bounds];
+  self.chatInput.font = TitleFont(20); self.chatInput.textColor = NSColor.whiteColor; self.chatInput.backgroundColor = NSColor.clearColor; self.chatInput.drawsBackground = NO; self.chatInput.insertionPointColor = NSColor.whiteColor; self.chatInput.string = self.chatDraftText ?: @""; self.chatInput.delegate = self; self.chatInput.automaticQuoteSubstitutionEnabled = NO; self.chatInput.automaticDashSubstitutionEnabled = NO; self.chatInput.automaticTextReplacementEnabled = NO;
+  self.chatPlaceholder = [[NSTextField alloc] initWithFrame:NSMakeRect(22, self.chatComposerHasCode ? composerH - 48 : 14, input.frame.size.width-44,30)];
+  self.chatPlaceholder.stringValue = @"Type your message here..."; self.chatPlaceholder.font = TitleFont(20); self.chatPlaceholder.textColor = [NSColor colorWithCalibratedWhite:0.72 alpha:1.0]; self.chatPlaceholder.bezeled = NO; self.chatPlaceholder.drawsBackground = NO; self.chatPlaceholder.editable = NO; self.chatPlaceholder.selectable = NO; self.chatPlaceholder.hidden = self.chatInput.string.length > 0;
+  [input addSubview:self.chatPlaceholder];
+  messageScroll.documentView = self.chatInput; [input addSubview:messageScroll];
+  if (self.chatComposerHasCode) {
+    NSView *codeShell = [[NSView alloc] initWithFrame:NSMakeRect(18, 14, input.frame.size.width - 36, composerH - 82)];
+    codeShell.wantsLayer = YES; codeShell.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.35 alpha:1.0].CGColor; codeShell.layer.cornerRadius = 12;
+    NSTextField *header = [[NSTextField alloc] initWithFrame:NSMakeRect(16, codeShell.frame.size.height - 30, codeShell.frame.size.width - 32, 22)];
+    header.stringValue = @"</>  Swift"; header.font = MonoFont(16); header.textColor = [NSColor colorWithCalibratedWhite:0.78 alpha:1.0]; header.bezeled = NO; header.drawsBackground = NO; header.editable = NO; header.selectable = NO; [codeShell addSubview:header];
+    NSScrollView *codeScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(12, 10, codeShell.frame.size.width - 24, codeShell.frame.size.height - 44)];
+    codeScroll.borderType = NSNoBorder; codeScroll.hasVerticalScroller = YES; codeScroll.drawsBackground = NO;
+    self.chatCodeInput = [[NSTextView alloc] initWithFrame:codeScroll.bounds];
+    self.chatCodeInput.font = MonoFont(15); self.chatCodeInput.textColor = NSColor.whiteColor; self.chatCodeInput.backgroundColor = [NSColor colorWithCalibratedWhite:0.35 alpha:1.0]; self.chatCodeInput.insertionPointColor = NSColor.whiteColor; self.chatCodeInput.string = self.chatDraftCode ?: @""; self.chatCodeInput.delegate = self; self.chatCodeInput.automaticQuoteSubstitutionEnabled = NO; self.chatCodeInput.automaticDashSubstitutionEnabled = NO; self.chatCodeInput.automaticTextReplacementEnabled = NO;
+    codeScroll.documentView = self.chatCodeInput; [codeShell addSubview:codeScroll]; [input addSubview:codeShell];
+  } else {
+    self.chatCodeInput = nil;
+  }
+  [self.dynamicViews addObject:input]; [self.root addSubview:input];
+  [self button:@"->" frame:NSMakeRect(b.size.width-70,18,52,52) action:@selector(sendChatMessage:) blue:YES];
+  [self addSharedProjectNoticeIfNeeded];
+}
+- (void)closeChatPage:(id)sender {
+  NSString *target = self.chatReturnMode ?: @"log";
+  if ([target isEqualToString:@"editor"] && self.editingProject) [self showEditorWithPreview:!self.editingSharedProject];
+  else if ([target isEqualToString:@"projects"]) [self showProjectsPage];
+  else [self showLog];
+}
+- (void)sendChatMessage:(id)sender {
+  self.chatDraftText = self.chatInput.string ?: @"";
+  self.chatDraftCode = self.chatCodeInput.string ?: @"";
+  [self saveChatMessageText:self.chatDraftText code:(self.chatComposerHasCode ? self.chatDraftCode : nil)];
+  self.chatDraftText = nil;
+  self.chatDraftCode = nil;
+  self.chatComposerHasCode = NO;
+  [self showChatPage];
+}
+- (void)addChatCodeBox:(id)sender {
+  self.chatDraftText = self.chatInput.string ?: self.chatDraftText ?: @"";
+  if (!self.chatComposerHasCode) self.chatDraftCode = @"";
+  else self.chatDraftCode = self.chatCodeInput.string ?: self.chatDraftCode ?: @"";
+  self.chatComposerHasCode = YES;
+  [self showChatPage];
+}
+- (void)refreshChatIfOpen:(id)sender {
+  if (![self.screenMode isEqualToString:@"chat"]) return;
+  if (self.window.firstResponder == self.chatInput || self.window.firstResponder == self.chatCodeInput) return;
+  NSArray *messages = [self loadChatMessages];
+  NSData *data = [NSJSONSerialization dataWithJSONObject:messages options:0 error:nil];
+  NSString *signature = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+  if (self.lastChatSignature && [self.lastChatSignature isEqualToString:signature]) return;
+  self.lastChatSignature = signature;
+  [self showChatPage];
 }
 - (void)checkProjectShare:(id)sender {
   NSError *error = nil; NSDictionary *doc = GetDocument(@"Threads/ProjectShare", &error);
@@ -500,15 +1388,25 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   if (!requestID.length || ![status isEqualToString:@"queued"] || [self.lastFishRequestID isEqualToString:requestID]) return;
   self.lastFishRequestID = requestID;
   NSString *fileName = doc[@"fileName"] ?: @"ContentView";
-  [self appendLog:[NSString stringWithFormat:@"Fishy: suggesting for %@", fileName]];
+  NSString *kind = doc[@"kind"] ?: @"suggest";
+  [self appendLog:[NSString stringWithFormat:@"Fishy: %@ for %@", kind, fileName]];
   PatchDocument(@"Threads/Fishy", @{@"status":@"running", @"startedAt":NSDate.date}, nil);
-  NSString *result = FishySuggestionsForSource(doc[@"source"] ?: @"", fileName);
-  PatchDocument(@"Threads/Fishy", @{@"status":@"complete", @"requestId":requestID, @"result":result, @"error":@"", @"completedAt":NSDate.date}, nil);
-  [self appendLog:@"Fishy: suggestions complete"];
+  if ([kind isEqualToString:@"implement"]) {
+    NSString *summary = nil;
+    BOOL shouldApply = NO;
+    NSString *resultCode = FishySafeImplementedSource(doc[@"source"] ?: @"", &summary, &shouldApply);
+    PatchDocument(@"Threads/Fishy", @{@"status":@"complete", @"requestId":requestID, @"kind":kind, @"result":summary ?: @"", @"resultCode":(shouldApply ? resultCode ?: @"" : @""), @"error":@"", @"completedAt":NSDate.date}, nil);
+    [self appendLog:@"Fishy: implement complete"];
+  } else {
+    NSString *result = FishySuggestionsForSource(doc[@"source"] ?: @"", fileName);
+    PatchDocument(@"Threads/Fishy", @{@"status":@"complete", @"requestId":requestID, @"kind":kind, @"result":result, @"error":@"", @"completedAt":NSDate.date}, nil);
+    [self appendLog:@"Fishy: suggestions complete"];
+  }
 }
 - (void)redrawCurrentScreen {
   if ([self.screenMode isEqualToString:@"editor"] && self.editingProject) [self showEditorWithPreview:!self.editingSharedProject];
   else if ([self.screenMode isEqualToString:@"projects"]) [self showProjectsPage];
+  else if ([self.screenMode isEqualToString:@"chat"]) [self showChatPage];
   else [self showLog];
 }
 - (void)loadStore {
@@ -532,6 +1430,7 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   [self label:@"SwiftStudio" frame:NSMakeRect(0,b.size.height-82,b.size.width,64) font:TitleFont(48) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter;
   [self addLine:NSMakeRect(0,b.size.height-92,b.size.width,2)];
   [self button:@"Back to log" frame:NSMakeRect(18,b.size.height-70,156,42) action:@selector(backToLogButton:) blue:YES];
+  [self button:@"Chat" frame:NSMakeRect(186,b.size.height-70,100,42) action:@selector(showChatPage) blue:YES];
   CGFloat y = b.size.height - 178;
   for (NSString *pid in self.projectIDs) {
     NSDictionary *p = self.store[@"projects"][pid]; BOOL selected = [pid isEqualToString:self.activeProjectID];
@@ -617,8 +1516,9 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   [self label:self.editingProject[@"name"] ?: @"Project" frame:NSMakeRect(64,headerY+6,230,58) font:TitleFont(42) color:NSColor.whiteColor];
   if (preview) [self button:@"Send" frame:NSMakeRect(310,headerY+16,120,44) action:@selector(sendLocalPreview:) blue:YES];
   [self button:@"Share" frame:NSMakeRect(preview ? 442 : 310,headerY+16,120,44) action:(self.editingSharedProject ? @selector(sendBackToStudio:) : @selector(shareLocalProject:)) blue:YES];
-  [self button:@"Rename" frame:NSMakeRect(preview ? 574 : 442,headerY+16,120,44) action:@selector(renameEditingProject:) blue:YES];
-  [self button:@"Rename File" frame:NSMakeRect(preview ? 706 : 574,headerY+16,150,44) action:@selector(renameEditingFile:) blue:YES];
+  [self button:@"Chat" frame:NSMakeRect(preview ? 574 : 442,headerY+16,100,44) action:@selector(showChatPage) blue:YES];
+  [self button:@"Rename" frame:NSMakeRect(preview ? 686 : 554,headerY+16,120,44) action:@selector(renameEditingProject:) blue:YES];
+  [self button:@"Rename File" frame:NSMakeRect(preview ? 818 : 686,headerY+16,150,44) action:@selector(renameEditingFile:) blue:YES];
   [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)];
   CGFloat y = contentTop - 30; for (NSString *fid in [self fileIDsForProject:self.editingProject]) { NSDictionary *f = self.editingProject[@"files"][fid]; if (self.swiftLogo) { NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,y-1,32,28)]; iv.image = self.swiftLogo; [self.dynamicViews addObject:iv]; [self.root addSubview:iv]; } [self label:f[@"name"] ?: fid frame:NSMakeRect(54,y,175,27) font:MonoFont(21) color:NSColor.whiteColor]; NSButton *hit = [self button:@"" frame:NSMakeRect(0,y-4,240,34) action:@selector(selectFile:) blue:NO]; hit.identifier = fid; hit.layer.backgroundColor = ([fid isEqualToString:self.activeFileID] ? Blue() : NSColor.clearColor).CGColor; hit.layer.opacity = [fid isEqualToString:self.activeFileID] ? 0.35 : 0.0; y -= 36; }
   [self button:@"+" frame:NSMakeRect(18,18,32,32) action:@selector(newFile:) blue:YES];
@@ -743,7 +1643,13 @@ static NSArray<NSString *> *ParseThreads(int argc, const char *argv[]) {
   [self.editor setSelectedRange:NSMakeRange(MIN(selected.location, text.length), MIN(selected.length, text.length - MIN(selected.location, text.length)))];
   self.applyingHighlight = NO;
 }
-- (void)textDidChange:(NSNotification *)n { [self saveEditingProject]; [self applySyntaxHighlighting]; }
+- (void)textDidChange:(NSNotification *)n {
+  if (n.object == self.chatInput) { self.chatDraftText = self.chatInput.string ?: @""; self.chatPlaceholder.hidden = self.chatDraftText.length > 0; return; }
+  if (n.object == self.chatCodeInput) { self.chatDraftCode = self.chatCodeInput.string ?: @""; return; }
+  if (n.object != self.editor) return;
+  [self saveEditingProject];
+  [self applySyntaxHighlighting];
+}
 - (void)saveEditingProject { if (!self.activeFileID.length || !self.editor) return; [self currentFile][@"code"] = self.editor.string ?: @""; self.editingProject[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); self.editingProject[@"activeFile"] = self.activeFileID; if (!self.editingSharedProject) [self saveStore]; }
 - (void)selectFile:(NSButton *)sender { [self saveEditingProject]; self.activeFileID = sender.identifier; self.editingProject[@"activeFile"] = self.activeFileID; if (!self.editingSharedProject) [self saveStore]; [self showEditorWithPreview:!self.editingSharedProject]; }
 - (void)newFile:(id)sender { [self saveEditingProject]; NSString *fid = [NSString stringWithFormat:@"File%lu", (unsigned long)[self fileIDsForProject:self.editingProject].count + 1]; self.editingProject[@"files"][fid] = [@{@"name":fid, @"code":@"import SwiftUI\n"} mutableCopy]; self.activeFileID = fid; self.editingProject[@"activeFile"] = fid; self.editingProject[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); if (!self.editingSharedProject) [self saveStore]; [self showEditorWithPreview:!self.editingSharedProject]; }
