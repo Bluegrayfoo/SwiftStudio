@@ -47,6 +47,29 @@ Open the studio:
 ~/cmds/code_studio --thread Thread1
 ```
 
+## Studio Terminal
+
+The bottom console accepts these commands:
+
+```text
+studio run        run the program and open the preview
+studio compile    compile only; do not run the preview
+studio share      share the project with the preview runner
+studio stop       stop any running preview
+
+fish cleanup      clean up spacing and indentation
+fish implement    compile, apply fixes, compile again, and update the terminal
+fish suggest      ask the preview runner for style and efficiency suggestions
+```
+
+If `~/fishytool/swift-syntax` is installed before running `install_runner.sh`, the runner installer also builds:
+
+```text
+~/cmds/fishy_syntax
+```
+
+The preview runner uses that helper for `fish suggest` parser diagnostics. If the helper is not installed, the runner still returns built-in style and efficiency suggestions.
+
 ## Editor Features
 
 - Automatic indentation on new lines.
@@ -84,6 +107,7 @@ SwiftStudio uses the Firebase project embedded in the source.
 - `Threads/<thread>/Compiled/<requestId>-0000...`
 - `Threads/ProjectShare`
 - `Threads/ProjectReturn`
+- `Threads/Fishy`
 - `LatestHistory/History.hist`
 
 `code_studio` writes raw SwiftUI source to the selected thread's `send` field. `preview_runner` compiles that raw source, strips Xcode-only `#Preview { ... }` blocks for command-line compilation, wraps `ContentView` in an exported `NSHostingView` factory, uploads the compiled preview library as base64 chunks, and writes the status back. The runner has its own log window, but it does not open preview windows. When Studio sees a successful response, Studio downloads the compiled library, writes it to a uniquely named local temp library for that request, loads it, and hosts the returned preview view locally.
@@ -125,6 +149,7 @@ xcode-select --install
 
 ```text
 src/code_studio_native.m
+src/fishy_syntax/Sources/FishySyntax/main.swift
 src/preview_runner_native.m
 assets/swiftlogo.png
 install.sh

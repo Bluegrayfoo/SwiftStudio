@@ -15,6 +15,7 @@ static NSFont *MonoFont(CGFloat size) { return [NSFont fontWithName:@"Menlo-Bold
 static id FirestoreValue(id value) {
   if (!value) return @{@"nullValue": [NSNull null]};
   if ([value isKindOfClass:[NSString class]]) return @{@"stringValue": value};
+  if ([value isKindOfClass:[NSNumber class]] && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return @{@"booleanValue": value};
   if ([value isKindOfClass:[NSNumber class]]) return @{@"doubleValue": value};
   if ([value isKindOfClass:[NSDate class]]) {
     NSDateFormatter *fmt = [NSDateFormatter new]; fmt.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]; fmt.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0]; fmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
@@ -30,6 +31,7 @@ static id FirestoreValue(id value) {
 
 static id NativeValue(NSDictionary *value) {
   if (value[@"stringValue"]) return value[@"stringValue"];
+  if (value[@"booleanValue"]) return value[@"booleanValue"];
   if (value[@"doubleValue"]) return value[@"doubleValue"];
   if (value[@"integerValue"]) return @([value[@"integerValue"] doubleValue]);
   if (value[@"timestampValue"]) return value[@"timestampValue"];
@@ -130,6 +132,10 @@ static void UpdateHistory(NSString *appName) {
 @property NSTextView *editor;
 @property NSTextView *console;
 @property NSMutableString *consoleLog;
+@property NSUInteger consoleInputStart;
+@property BOOL updatingConsoleProgrammatically;
+@property BOOL keepConsoleLogForNextSend;
+@property BOOL compileOnlyRequest;
 @property NSImage *swiftLogo;
 @property BOOL showingProject;
 @property BOOL openingPreview;
@@ -149,6 +155,10 @@ static void UpdateHistory(NSString *appName) {
 @property NSString *lastIncomingShareID;
 @property NSMutableDictionary *incomingSharedProject;
 @property NSString *incomingShareMessage;
+@property NSString *incomingShareStatus;
+@property NSMutableArray<NSView *> *floatingPreviewControls;
+@property BOOL fishyPanelMode;
+@property NSString *fishyBubbleText;
 @end
 
 @implementation StudioDelegate
@@ -199,17 +209,89 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)clearDynamic { for (NSView *v in self.dynamicViews) [v removeFromSuperview]; [self.dynamicViews removeAllObjects]; }
 - (void)addLine:(NSRect)frame { NSBox *box = [[NSBox alloc] initWithFrame:frame]; box.boxType = NSBoxCustom; box.borderColor = NSColor.whiteColor; box.fillColor = NSColor.whiteColor; [self.dynamicViews addObject:box]; [self.root addSubview:box]; }
+- (NSString *)terminalPrompt { return @"noah@swift-studio ∫ "; }
+- (void)appendPromptToConsoleLog {
+  if (!self.consoleLog) self.consoleLog = [NSMutableString string];
+  NSString *prompt = [self terminalPrompt];
+  if (![self.consoleLog hasSuffix:prompt]) [self.consoleLog appendString:prompt];
+}
+- (void)showConsoleText:(NSString *)text inputAtEnd:(BOOL)inputAtEnd {
+  if (!self.console) return;
+  self.updatingConsoleProgrammatically = YES;
+  self.console.string = text ?: @"";
+  if (self.fishyPanelMode) {
+    NSDictionary *base = @{NSForegroundColorAttributeName:NSColor.whiteColor, NSFontAttributeName:MonoFont(19)};
+    [self.console.textStorage setAttributes:base range:NSMakeRange(0, self.console.string.length)];
+    NSColor *cyan = [NSColor colorWithCalibratedRed:0.05 green:1.0 blue:1.0 alpha:1.0];
+    NSColor *green = [NSColor colorWithCalibratedRed:0.2 green:1.0 blue:0.2 alpha:1.0];
+    NSColor *blue = [NSColor colorWithCalibratedRed:0.24 green:0.52 blue:1.0 alpha:1.0];
+    [self colorConsolePattern:@"Fishy" color:NSColor.whiteColor font:TitleFont(40)];
+    [self colorConsolePattern:@"SwiftStudio" color:blue font:TitleFont(38)];
+    [self colorConsolePattern:@"</>[^\\n]*" color:cyan font:MonoFont(19)];
+    [self colorConsolePattern:@"Edited [^\\n]*" color:cyan font:MonoFont(19)];
+  }
+  self.consoleInputStart = inputAtEnd ? self.console.string.length : self.consoleInputStart;
+  if (self.fishyPanelMode) {
+    [self.console setSelectedRange:NSMakeRange(0, 0)];
+    [self.console scrollToBeginningOfDocument:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{ [self.console scrollToBeginningOfDocument:nil]; });
+  } else {
+    [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)];
+  }
+  self.updatingConsoleProgrammatically = NO;
+}
+- (void)colorConsolePattern:(NSString *)pattern color:(NSColor *)color font:(NSFont *)font {
+  if (!self.console.string.length) return;
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  [regex enumerateMatchesInString:self.console.string options:0 range:NSMakeRange(0, self.console.string.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    if (result.range.location == NSNotFound) return;
+    [self.console.textStorage addAttribute:NSForegroundColorAttributeName value:color range:result.range];
+    [self.console.textStorage addAttribute:NSFontAttributeName value:font range:result.range];
+  }];
+}
+- (NSString *)projectIDMatchingName:(NSString *)name {
+  if (!name.length) return nil;
+  for (NSString *pid in self.projectIDs) {
+    NSString *projectName = self.store[@"projects"][pid][@"name"] ?: @"";
+    if ([projectName isEqualToString:name]) return pid;
+  }
+  return nil;
+}
+- (NSString *)uniqueProjectName:(NSString *)name {
+  NSString *base = name.length ? name : @"SharedProject";
+  NSString *candidate = base;
+  NSUInteger suffix = 2;
+  BOOL exists = YES;
+  while (exists) {
+    exists = NO;
+    for (NSString *pid in self.projectIDs) {
+      NSString *projectName = self.store[@"projects"][pid][@"name"] ?: @"";
+      if ([projectName isEqualToString:candidate]) { exists = YES; break; }
+    }
+    if (exists) candidate = [NSString stringWithFormat:@"%@ %lu", base, (unsigned long)suffix++];
+  }
+  return candidate;
+}
+- (NSString *)projectIDForNewProjectName:(NSString *)name {
+  NSString *base = [[(name.length ? name : @"SharedProject") componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@""];
+  if (!base.length) base = @"SharedProject";
+  NSString *pid = [base lowercaseString];
+  NSUInteger suffix = 2;
+  while (self.store[@"projects"][pid]) pid = [NSString stringWithFormat:@"%@%lu", [base lowercaseString], (unsigned long)suffix++];
+  return pid;
+}
 - (void)addNoticeCardIfNeeded {
   if (!self.incomingSharedProject) return;
   NSRect b = self.root.bounds;
-  CGFloat w = 360, h = 66, x = MAX(18, (b.size.width - w) / 2), y = MAX(76, b.size.height - 158);
+  BOOL returnedProject = [self.incomingShareStatus isEqualToString:@"sent_back"];
+  CGFloat w = returnedProject ? 560 : 440, h = 66, x = MAX(18, (b.size.width - w) / 2), y = MAX(76, b.size.height - 158);
   NSView *card = [[NSView alloc] initWithFrame:NSMakeRect(x, y, w, h)];
   card.wantsLayer = YES;
   card.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.28 alpha:0.96].CGColor;
   card.layer.cornerRadius = 12;
   card.layer.borderColor = [NSColor colorWithCalibratedWhite:0.55 alpha:1.0].CGColor;
   card.layer.borderWidth = 1;
-  NSTextField *message = [[NSTextField alloc] initWithFrame:NSMakeRect(18, 17, w - 142, 32)];
+  NSTextField *message = [[NSTextField alloc] initWithFrame:NSMakeRect(18, 17, returnedProject ? w - 348 : w - 226, 32)];
   message.stringValue = self.incomingShareMessage ?: @"Project sent back";
   message.font = TitleFont(22);
   message.textColor = NSColor.whiteColor;
@@ -218,13 +300,39 @@ static void UpdateHistory(NSString *appName) {
   message.editable = NO;
   message.selectable = NO;
   [card addSubview:message];
-  NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(w - 116, 14, 96, 38)];
+  NSButton *decline = [[NSButton alloc] initWithFrame:NSMakeRect(returnedProject ? w - 326 : w - 204, 14, 86, 38)];
+  decline.title = @"Decline";
+  decline.font = TitleFont(18);
+  decline.bezelStyle = NSBezelStyleRegularSquare;
+  decline.bordered = NO;
+  decline.target = self;
+  decline.action = @selector(declineSharedProject:);
+  decline.wantsLayer = YES;
+  decline.layer.cornerRadius = 19;
+  decline.layer.backgroundColor = [NSColor colorWithCalibratedRed:0.70 green:0.06 blue:0.06 alpha:1.0].CGColor;
+  [decline setContentTintColor:NSColor.whiteColor];
+  [card addSubview:decline];
+  if (returnedProject) {
+    NSButton *add = [[NSButton alloc] initWithFrame:NSMakeRect(w - 228, 14, 122, 38)];
+    add.title = @"Add to projects";
+    add.font = TitleFont(15);
+    add.bezelStyle = NSBezelStyleRegularSquare;
+    add.bordered = NO;
+    add.target = self;
+    add.action = @selector(addIncomingProjectToProjects:);
+    add.wantsLayer = YES;
+    add.layer.cornerRadius = 19;
+    add.layer.backgroundColor = Blue().CGColor;
+    [add setContentTintColor:NSColor.whiteColor];
+    [card addSubview:add];
+  }
+  NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(w - 96, 14, 76, 38)];
   button.title = [self.incomingShareMessage isEqualToString:@"Add to projects"] ? @"+" : @"Include";
   button.font = TitleFont(21);
   button.bezelStyle = NSBezelStyleRegularSquare;
   button.bordered = NO;
   button.target = self;
-  button.action = @selector(includeSharedProject:);
+  button.action = [self.incomingShareStatus isEqualToString:@"add_to_projects"] ? @selector(addIncomingProjectToProjects:) : @selector(includeSharedProject:);
   button.wantsLayer = YES;
   button.layer.cornerRadius = 19;
   button.layer.backgroundColor = Blue().CGColor;
@@ -283,28 +391,51 @@ static void UpdateHistory(NSString *appName) {
   if (!requestID.length || !project || [requestID isEqualToString:self.lastIncomingShareID]) return;
   self.lastIncomingShareID = requestID;
   self.incomingSharedProject = [project mutableCopy];
+  self.incomingShareStatus = doc[@"status"] ?: @"sent_back";
   self.incomingShareMessage = [doc[@"status"] isEqualToString:@"add_to_projects"] ? @"Add to projects" : @"Project sent back";
+  PatchDocument(@"Threads/ProjectReturn", @{@"status":@"", @"requestId":requestID, @"project":@{}, @"clearedAt":NSDate.date}, nil);
   if (self.showingProject) [self showProject];
   else [self showMain];
 }
 - (void)includeSharedProject:(id)sender {
   if (!self.incomingSharedProject) return;
   NSString *incomingName = self.incomingSharedProject[@"name"] ?: @"SharedProject";
-  NSString *base = [[incomingName componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet] invertedSet]] componentsJoinedByString:@""];
-  if (!base.length) base = @"SharedProject";
-  NSString *pid = [base lowercaseString];
-  NSUInteger suffix = 2;
-  while (self.store[@"projects"][pid]) pid = [NSString stringWithFormat:@"%@%lu", [base lowercaseString], (unsigned long)suffix++];
   NSMutableDictionary *project = [self.incomingSharedProject mutableCopy];
   project[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
   if (!project[@"activeFile"]) project[@"activeFile"] = [project[@"files"] allKeys].firstObject ?: @"ContentView";
+  NSString *pid = [self projectIDMatchingName:incomingName];
+  if (!pid.length) pid = [self projectIDForNewProjectName:incomingName];
   self.store[@"projects"][pid] = project;
   self.activeProjectID = pid;
   self.store[@"activeProject"] = pid;
   self.incomingSharedProject = nil;
   self.incomingShareMessage = nil;
+  self.incomingShareStatus = nil;
   [self saveStore];
   [self showMain];
+}
+- (void)addIncomingProjectToProjects:(id)sender {
+  if (!self.incomingSharedProject) return;
+  NSMutableDictionary *project = [self.incomingSharedProject mutableCopy];
+  project[@"name"] = [self uniqueProjectName:project[@"name"] ?: @"SharedProject"];
+  project[@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
+  if (!project[@"activeFile"]) project[@"activeFile"] = [project[@"files"] allKeys].firstObject ?: @"ContentView";
+  NSString *pid = [self projectIDForNewProjectName:project[@"name"]];
+  self.store[@"projects"][pid] = project;
+  self.activeProjectID = pid;
+  self.store[@"activeProject"] = pid;
+  self.incomingSharedProject = nil;
+  self.incomingShareMessage = nil;
+  self.incomingShareStatus = nil;
+  [self saveStore];
+  [self showMain];
+}
+- (void)declineSharedProject:(id)sender {
+  self.incomingSharedProject = nil;
+  self.incomingShareMessage = nil;
+  self.incomingShareStatus = nil;
+  if (self.showingProject) [self showProject];
+  else [self showMain];
 }
 - (void)selectProject:(NSButton *)sender {
   self.activeProjectID = sender.identifier;
@@ -348,28 +479,30 @@ static void UpdateHistory(NSString *appName) {
   self.activeProjectID = pid; self.store[@"activeProject"] = pid; [self saveStore]; [self showMain];
 }
 - (void)showProject {
-  self.showingProject = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; NSDictionary *p = [self project]; if (!self.activeFileID) self.activeFileID = p[@"activeFile"] ?: self.fileIDs.firstObject;
+  self.showingProject = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; self.floatingPreviewControls = [NSMutableArray array]; NSDictionary *p = [self project]; if (!self.activeFileID) self.activeFileID = p[@"activeFile"] ?: self.fileIDs.firstObject;
   NSRect b = self.root.bounds;
-  CGFloat leftW = 244, headerY = MAX(674, b.size.height - 91), contentTop = headerY - 19, consoleH = 126;
+  CGFloat leftW = 244, headerY = MAX(674, b.size.height - 91), contentTop = headerY - 19, consoleH = self.fishyPanelMode ? 332 : 126;
   BOOL previewVisible = [self previewPaneVisible];
   CGFloat sideBarW = (previewVisible && self.previewPaneWide) ? 46 : 0;
-  CGFloat editorX = 264, editorY = 165, consoleY = 16;
+  CGFloat editorX = 264, consoleY = self.fishyPanelMode ? 0 : 16, contentBottom = self.fishyPanelMode ? consoleH + 16 : consoleY, editorY = contentBottom + 23;
+  CGFloat consoleX = self.fishyPanelMode ? 0 : editorX;
   CGFloat previewW = 0, editorW = MAX(260, b.size.width - editorX - 44);
+  CGFloat consoleW = self.fishyPanelMode ? b.size.width : editorW;
   if (previewVisible && self.previewPaneWide) {
     previewW = MAX(260, b.size.width - leftW - sideBarW - 38);
     editorW = 0;
-    self.previewPaneFrame = NSMakeRect(leftW + sideBarW + 16, consoleY, previewW, contentTop - consoleY);
+    self.previewPaneFrame = NSMakeRect(leftW + sideBarW + 16, contentBottom, previewW, contentTop - contentBottom);
   } else if (previewVisible) {
     previewW = MAX(330, MIN(520, b.size.width * 0.32));
     CGFloat rightEdge = b.size.width - 22 - previewW;
     editorW = MAX(260, rightEdge - editorX - 16);
     previewW = MIN(previewW, MAX(260, b.size.width - (editorX + editorW + 16) - 22));
-    self.previewPaneFrame = NSMakeRect(editorX + editorW + 16, consoleY, previewW, contentTop - consoleY);
+    self.previewPaneFrame = NSMakeRect(editorX + editorW + 16, contentBottom, previewW, contentTop - contentBottom);
   } else {
     self.previewPaneFrame = NSZeroRect;
   }
   CGFloat editorH = MAX(220, contentTop - editorY);
-  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,145,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(402,headerY+16,130,44) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(544,headerY+16,100,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(656,headerY+16,120,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(788,headerY+16,150,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,0,2,headerY)]; [self addLine:NSMakeRect(editorX,155,editorW,2)];
+  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,145,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(402,headerY+16,130,44) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(544,headerY+16,100,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(656,headerY+16,120,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(788,headerY+16,150,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,self.fishyPanelMode ? consoleH : 0,2,headerY - (self.fishyPanelMode ? consoleH : 0))]; [self addLine:self.fishyPanelMode ? NSMakeRect(0,consoleH,b.size.width,2) : NSMakeRect(editorX,consoleY + consoleH,editorW,2)];
   if (previewVisible) {
     CGFloat dividerX = self.previewPaneFrame.origin.x - 9 - sideBarW;
     [self addLine:NSMakeRect(dividerX, 0, 2, headerY)];
@@ -377,10 +510,12 @@ static void UpdateHistory(NSString *appName) {
       NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect(dividerX + 2, 0, sideBarW, headerY)];
       bar.wantsLayer = YES; bar.layer.backgroundColor = DarkRow().CGColor;
       [self.dynamicViews addObject:bar]; [self.root addSubview:bar];
-      [self button:@">|>" frame:NSMakeRect(dividerX + 7, headerY - 70, 36, 32) action:@selector(normalPreviewPane:) blue:YES];
-      [self button:@">|" frame:NSMakeRect(dividerX + 7, headerY - 112, 36, 32) action:@selector(collapsePreviewPane:) blue:YES];
+      NSButton *normal = [self button:@">|>" frame:NSMakeRect(dividerX + 7, headerY - 48, 36, 32) action:@selector(normalPreviewPane:) blue:YES];
+      NSButton *collapse = [self button:@">|" frame:NSMakeRect(dividerX + 7, headerY - 88, 36, 32) action:@selector(collapsePreviewPane:) blue:YES];
+      [self.floatingPreviewControls addObject:normal]; [self.floatingPreviewControls addObject:collapse];
     } else {
-      [self button:@"|<" frame:NSMakeRect(self.previewPaneFrame.origin.x - 55, headerY + 15, 42, 34) action:@selector(widenPreviewPane:) blue:YES];
+      NSButton *wide = [self button:@"|<" frame:NSMakeRect(self.previewPaneFrame.origin.x - 55, headerY - 48, 42, 34) action:@selector(widenPreviewPane:) blue:YES];
+      [self.floatingPreviewControls addObject:wide];
     }
     self.previewContainerView = [[NSView alloc] initWithFrame:self.previewPaneFrame]; self.previewContainerView.wantsLayer = YES; self.previewContainerView.layer.backgroundColor = NSColor.blackColor.CGColor; self.previewContainerView.layer.borderColor = NSColor.whiteColor.CGColor; self.previewContainerView.layer.borderWidth = 1; [self.dynamicViews addObject:self.previewContainerView]; [self.root addSubview:self.previewContainerView];
     if (!self.previewContentView) {
@@ -396,13 +531,34 @@ static void UpdateHistory(NSString *appName) {
     }
   } else { self.previewContainerView = nil; }
   CGFloat y = contentTop - 30; for (NSString *fid in self.fileIDs) { NSDictionary *f = [self project][@"files"][fid]; if (self.swiftLogo) { NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,y-1,32,28)]; iv.image = self.swiftLogo; [self.dynamicViews addObject:iv]; [self.root addSubview:iv]; } [self label:f[@"name"] frame:NSMakeRect(54,y,175,27) font:MonoFont(21) color:NSColor.whiteColor]; NSButton *hit = [self button:@"" frame:NSMakeRect(0,y-4,240,34) action:@selector(selectFile:) blue:NO]; hit.identifier = fid; hit.layer.backgroundColor = ([fid isEqualToString:self.activeFileID] ? Blue() : NSColor.clearColor).CGColor; hit.layer.opacity = [fid isEqualToString:self.activeFileID] ? 0.35 : 0.0; y -= 36; }
-  [self button:@"+" frame:NSMakeRect(18,18,32,32) action:@selector(newFile:) blue:YES]; [self button:(previewVisible ? @"<" : @">") frame:NSMakeRect(58,18,32,32) action:@selector(togglePreviewPane:) blue:YES];
+  CGFloat bottomButtonY = self.fishyPanelMode ? consoleH + 18 : 18;
+  [self button:@"+" frame:NSMakeRect(18,bottomButtonY,32,32) action:@selector(newFile:) blue:YES]; [self button:(previewVisible ? @"<" : @">") frame:NSMakeRect(58,bottomButtonY,32,32) action:@selector(togglePreviewPane:) blue:YES];
   if (!self.previewPaneWide) {
     NSScrollView *editScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(editorX,editorY,editorW,editorH)]; editScroll.borderType = NSNoBorder; [self tuneScrollView:editScroll]; editScroll.wantsLayer = YES; editScroll.layer.backgroundColor = NSColor.blackColor.CGColor;
     self.editor = [[NSTextView alloc] initWithFrame:editScroll.bounds]; self.editor.font = MonoFont(19); self.editor.textColor = NSColor.whiteColor; self.editor.backgroundColor = NSColor.blackColor; self.editor.insertionPointColor = NSColor.whiteColor; self.editor.automaticQuoteSubstitutionEnabled = NO; self.editor.automaticDashSubstitutionEnabled = NO; self.editor.automaticTextReplacementEnabled = NO; self.editor.allowsUndo = YES; self.editor.delegate = self; self.editor.string = [self file][@"code"] ?: @""; editScroll.documentView = self.editor; [self.dynamicViews addObject:editScroll]; [self.root addSubview:editScroll]; [self applySyntaxHighlighting];
-    NSScrollView *consoleScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(editorX,consoleY,editorW,consoleH)]; [self tuneScrollView:consoleScroll]; consoleScroll.wantsLayer = YES; consoleScroll.layer.backgroundColor = NSColor.blackColor.CGColor; self.console = [[NSTextView alloc] initWithFrame:consoleScroll.bounds]; self.console.font = MonoFont(19); self.console.textColor = NSColor.whiteColor; self.console.backgroundColor = NSColor.blackColor; self.console.editable = NO; self.console.verticallyResizable = YES; self.console.maxSize = NSMakeSize(FLT_MAX, FLT_MAX); consoleScroll.documentView = self.console; [self.dynamicViews addObject:consoleScroll]; [self.root addSubview:consoleScroll]; [self refreshConsole:nil];
+    NSScrollView *consoleScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(consoleX,consoleY,consoleW,consoleH)]; [self tuneScrollView:consoleScroll]; consoleScroll.wantsLayer = YES; consoleScroll.layer.backgroundColor = (self.fishyPanelMode ? [NSColor colorWithCalibratedWhite:0.17 alpha:1.0] : NSColor.blackColor).CGColor; self.console = [[NSTextView alloc] initWithFrame:consoleScroll.bounds]; self.console.textContainerInset = self.fishyPanelMode ? NSMakeSize(18, 16) : NSMakeSize(0, 0); self.console.font = MonoFont(19); self.console.textColor = NSColor.whiteColor; self.console.backgroundColor = self.fishyPanelMode ? [NSColor colorWithCalibratedWhite:0.17 alpha:1.0] : NSColor.blackColor; self.console.insertionPointColor = NSColor.whiteColor; self.console.editable = YES; self.console.delegate = self; self.console.automaticQuoteSubstitutionEnabled = NO; self.console.automaticDashSubstitutionEnabled = NO; self.console.automaticTextReplacementEnabled = NO; self.console.verticallyResizable = YES; self.console.maxSize = NSMakeSize(FLT_MAX, FLT_MAX); consoleScroll.documentView = self.console; [self.dynamicViews addObject:consoleScroll]; [self.root addSubview:consoleScroll]; [self refreshConsole:nil];
+    if (self.fishyPanelMode && self.fishyBubbleText.length) {
+      NSButton *closeFishy = [self redButton:@"x" frame:NSMakeRect(consoleX + 14, consoleY + consoleH - 48, 34, 34) action:@selector(closeFishyPanel:)];
+      [self.root addSubview:closeFishy positioned:NSWindowAbove relativeTo:nil];
+      CGFloat bubbleW = MIN(560, MAX(320, consoleW * 0.34));
+      NSTextField *bubble = [[NSTextField alloc] initWithFrame:NSMakeRect(consoleX + consoleW - bubbleW - 18, consoleY + consoleH - 64, bubbleW, 38)];
+      bubble.stringValue = self.fishyBubbleText;
+      bubble.font = MonoFont(17);
+      bubble.textColor = NSColor.whiteColor;
+      bubble.alignment = NSTextAlignmentCenter;
+      bubble.bezeled = NO;
+      bubble.drawsBackground = NO;
+      bubble.editable = NO;
+      bubble.selectable = NO;
+      bubble.wantsLayer = YES;
+      bubble.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.43 alpha:1.0].CGColor;
+      bubble.layer.cornerRadius = 18;
+      [self.dynamicViews addObject:bubble];
+      [self.root addSubview:bubble positioned:NSWindowAbove relativeTo:nil];
+    }
   }
-	  [self placePreviewContent];
+  [self placePreviewContent];
+  for (NSView *control in self.floatingPreviewControls) [self.root addSubview:control positioned:NSWindowAbove relativeTo:nil];
   [self addNoticeCardIfNeeded];
 }
 - (void)editorChangedProgrammatically {
@@ -412,6 +568,21 @@ static void UpdateHistory(NSString *appName) {
   [self applySyntaxHighlighting];
 }
 - (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)replacementString {
+  if (textView == self.console) {
+    if (self.updatingConsoleProgrammatically) return YES;
+    if (range.location < self.consoleInputStart) return NO;
+    if ([replacementString isEqualToString:@"\n"]) {
+      NSString *text = self.console.string ?: @"";
+      NSString *command = @"";
+      if (self.consoleInputStart <= text.length) command = [[text substringFromIndex:self.consoleInputStart] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+      if (!self.consoleLog) self.consoleLog = [NSMutableString string];
+      self.consoleLog = [text mutableCopy];
+      [self.consoleLog appendString:@"\n"];
+      [self runTerminalCommand:command];
+      return NO;
+    }
+    return YES;
+  }
   if (textView != self.editor) return YES;
   NSString *text = textView.string ?: @"";
   if ([replacementString isEqualToString:@"{"]) {
@@ -543,6 +714,711 @@ static void UpdateHistory(NSString *appName) {
 - (void)renameProjectInEditor:(id)sender { [self saveEditor]; [self renameProject:sender]; [self showProject]; }
 - (void)selectFile:(NSButton *)sender { [self saveEditor]; self.activeFileID = sender.identifier; [self project][@"activeFile"] = self.activeFileID; [self saveStore]; [self showProject]; }
 - (void)newFile:(id)sender { NSString *fid = [NSString stringWithFormat:@"File%lu", (unsigned long)self.fileIDs.count + 1]; [self project][@"files"][fid] = [@{@"name":fid, @"code":@"import SwiftUI\n"} mutableCopy]; self.activeFileID = fid; [self project][@"activeFile"] = fid; [self saveStore]; [self showProject]; }
+- (NSString *)fishCurrentCode { [self saveEditor]; return [self file][@"code"] ?: @""; }
+- (void)fishSetCurrentCode:(NSString *)code {
+  if (!code) return;
+  [self file][@"code"] = code;
+  [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
+  [self saveStore];
+  if (self.editor) {
+    NSRange selected = self.editor.selectedRange;
+    self.editor.string = code;
+    [self applySyntaxHighlighting];
+    [self.editor setSelectedRange:NSMakeRange(MIN(selected.location, code.length), 0)];
+  }
+}
+- (NSString *)fishTrimRight:(NSString *)line {
+  NSUInteger end = line.length;
+  while (end > 0) {
+    unichar c = [line characterAtIndex:end - 1];
+    if (c == ' ' || c == '\t' || c == '\r') end--; else break;
+  }
+  return [line substringToIndex:end];
+}
+- (NSDictionary *)fishBraceCountsInLine:(NSString *)line {
+  NSInteger opens = 0, closes = 0;
+  BOOL inString = NO, escaped = NO, inComment = NO;
+  for (NSUInteger i = 0; i < line.length; i++) {
+    unichar c = [line characterAtIndex:i];
+    unichar next = i + 1 < line.length ? [line characterAtIndex:i + 1] : 0;
+    if (inComment) break;
+    if (inString) {
+      if (escaped) escaped = NO;
+      else if (c == '\\') escaped = YES;
+      else if (c == '"') inString = NO;
+      continue;
+    }
+    if (c == '/' && next == '/') { inComment = YES; i++; continue; }
+    if (c == '"') { inString = YES; continue; }
+    if (c == '{') opens++;
+    else if (c == '}') closes++;
+  }
+  return @{@"opens":@(opens), @"closes":@(closes)};
+}
+- (NSString *)fishBraceSpacedCode:(NSString *)code {
+  NSMutableArray *out = [NSMutableArray array];
+  for (NSString *rawLine in [code componentsSeparatedByString:@"\n"]) {
+    NSString *line = [self fishTrimRight:rawLine];
+    NSMutableString *next = [NSMutableString string];
+    BOOL inString = NO, escaped = NO, inComment = NO;
+    for (NSUInteger i = 0; i < line.length; i++) {
+      unichar c = [line characterAtIndex:i];
+      unichar prev = next.length ? [next characterAtIndex:next.length - 1] : 0;
+      unichar ahead = i + 1 < line.length ? [line characterAtIndex:i + 1] : 0;
+      if (inComment) { [next appendFormat:@"%C", c]; continue; }
+      if (inString) {
+        [next appendFormat:@"%C", c];
+        if (escaped) escaped = NO;
+        else if (c == '\\') escaped = YES;
+        else if (c == '"') inString = NO;
+        continue;
+      }
+      if (c == '/' && ahead == '/') { inComment = YES; [next appendString:@"//"]; i++; continue; }
+      if (c == '"') { inString = YES; [next appendFormat:@"%C", c]; continue; }
+      if (c == '{' && next.length && prev != ' ' && prev != '\t' && prev != '\n') [next appendString:@" "];
+      [next appendFormat:@"%C", c];
+    }
+    [out addObject:next];
+  }
+  return [out componentsJoinedByString:@"\n"];
+}
+- (NSString *)fishIndentedCode:(NSString *)code {
+  NSMutableArray *out = [NSMutableArray array];
+  NSInteger depth = 0;
+  for (NSString *rawLine in [[self fishBraceSpacedCode:code] componentsSeparatedByString:@"\n"]) {
+    NSString *trimmedRight = [self fishTrimRight:rawLine];
+    NSString *trimmed = [trimmedRight stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if (!trimmed.length) { [out addObject:@""]; continue; }
+    NSUInteger leadingClosers = 0;
+    while (leadingClosers < trimmed.length && [trimmed characterAtIndex:leadingClosers] == '}') leadingClosers++;
+    NSInteger lineDepth = MAX(0, depth - (NSInteger)leadingClosers);
+    NSMutableString *indent = [NSMutableString string];
+    for (NSInteger i = 0; i < lineDepth; i++) [indent appendString:@"    "];
+    [out addObject:[indent stringByAppendingString:trimmed]];
+    NSDictionary *counts = [self fishBraceCountsInLine:trimmed];
+    depth = MAX(0, depth + [counts[@"opens"] integerValue] - [counts[@"closes"] integerValue]);
+  }
+  return [out componentsJoinedByString:@"\n"];
+}
+- (NSString *)fishSwiftFormatCode:(NSString *)code used:(BOOL *)used {
+  if (used) *used = NO;
+  NSString *toolRoot = [@"~/fishytool/swift-format" stringByExpandingTildeInPath];
+  NSString *releaseBinary = [toolRoot stringByAppendingPathComponent:@".build/release/swift-format"];
+  NSString *debugBinary = [toolRoot stringByAppendingPathComponent:@".build/debug/swift-format"];
+  NSString *packageFile = [toolRoot stringByAppendingPathComponent:@"Package.swift"];
+  NSFileManager *fm = NSFileManager.defaultManager;
+  BOOL useSwiftRun = NO;
+  NSString *launchPath = nil;
+  NSArray *baseArgs = nil;
+  if ([fm isExecutableFileAtPath:releaseBinary]) {
+    launchPath = releaseBinary;
+    baseArgs = @[@"format", @"-i"];
+  } else if ([fm isExecutableFileAtPath:debugBinary]) {
+    launchPath = debugBinary;
+    baseArgs = @[@"format", @"-i"];
+  } else if ([fm fileExistsAtPath:packageFile]) {
+    useSwiftRun = YES;
+    launchPath = @"/usr/bin/xcrun";
+    baseArgs = @[@"swift", @"run", @"--package-path", toolRoot, @"swift-format", @"format", @"-i"];
+  } else {
+    return nil;
+  }
+  NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-format-%.0f", NSDate.date.timeIntervalSince1970 * 1000]];
+  [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+  NSString *path = [dir stringByAppendingPathComponent:@"ContentView.swift"];
+  if (![code writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil]) return nil;
+  NSTask *task = [NSTask new];
+  task.launchPath = launchPath;
+  NSMutableArray *args = [baseArgs mutableCopy];
+  [args addObject:path];
+  task.arguments = args;
+  if (useSwiftRun) task.currentDirectoryPath = toolRoot;
+  NSPipe *pipe = [NSPipe pipe];
+  task.standardOutput = pipe;
+  task.standardError = pipe;
+  @try {
+    [task launch];
+    [task waitUntilExit];
+  } @catch (NSException *exception) {
+    [fm removeItemAtPath:dir error:nil];
+    return nil;
+  }
+  NSString *formatted = task.terminationStatus == 0 ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] : nil;
+  [fm removeItemAtPath:dir error:nil];
+  if (!formatted.length) return nil;
+  if (used) *used = YES;
+  return formatted;
+}
+- (NSString *)fishBestFormattedCode:(NSString *)code usedSwiftFormat:(BOOL *)usedSwiftFormat {
+  BOOL used = NO;
+  NSString *formatted = [self fishSwiftFormatCode:code used:&used];
+  if (usedSwiftFormat) *usedSwiftFormat = used;
+  return formatted ?: [self fishIndentedCode:code];
+}
+- (void)fishCleanup:(BOOL)deep {
+  NSString *before = [self fishCurrentCode];
+  BOOL usedSwiftFormat = NO;
+  NSString *after = [self fishBestFormattedCode:before usedSwiftFormat:&usedSwiftFormat];
+  if (deep) {
+    while ([after containsString:@"\n\n\n"]) after = [after stringByReplacingOccurrencesOfString:@"\n\n\n" withString:@"\n\n"];
+  }
+  [self fishSetCurrentCode:after];
+  NSString *fileName = [self file][@"name"] ?: self.activeFileID ?: @"ContentView";
+  [self.consoleLog appendFormat:@"🐠: Cleaned %@\n", fileName];
+  [self appendPromptToConsoleLog];
+  [self refreshConsole:nil];
+}
+- (NSString *)fishMovePreviewMacroOutsideTypeInCode:(NSString *)code actions:(NSMutableArray<NSString *> *)actions changedLines:(NSUInteger *)changedLines {
+  NSRange previewRange = [code rangeOfString:@"#Preview"];
+  if (previewRange.location == NSNotFound) return code;
+  NSArray<NSString *> *rawLines = [code componentsSeparatedByString:@"\n"];
+  NSMutableArray<NSString *> *lines = [rawLines mutableCopy];
+  NSInteger typeLine = -1, previewLine = -1, typeDepth = 0, typeEndLine = -1;
+  BOOL inType = NO;
+  for (NSUInteger i = 0; i < lines.count; i++) {
+    NSString *trimmed = [lines[i] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    NSDictionary *counts = [self fishBraceCountsInLine:lines[i]];
+    if (!inType && ([trimmed hasPrefix:@"struct "] || [trimmed hasPrefix:@"class "]) && [trimmed containsString:@": View"]) {
+      inType = YES;
+      typeLine = (NSInteger)i;
+      typeDepth = [counts[@"opens"] integerValue] - [counts[@"closes"] integerValue];
+      continue;
+    }
+    if (inType) {
+      if ([trimmed hasPrefix:@"#Preview"]) previewLine = (NSInteger)i;
+      typeDepth += [counts[@"opens"] integerValue] - [counts[@"closes"] integerValue];
+      if (typeDepth <= 0) {
+        typeEndLine = (NSInteger)i;
+        break;
+      }
+    }
+  }
+  if (typeLine < 0 || previewLine < 0 || typeEndLine < 0 || previewLine > typeEndLine) return code;
+  NSInteger previewDepth = 0, previewEndLine = -1;
+  for (NSInteger i = previewLine; i < (NSInteger)lines.count; i++) {
+    NSDictionary *counts = [self fishBraceCountsInLine:lines[(NSUInteger)i]];
+    previewDepth += [counts[@"opens"] integerValue] - [counts[@"closes"] integerValue];
+    if (i > previewLine && previewDepth <= 0) { previewEndLine = i; break; }
+  }
+  if (previewEndLine < previewLine) return code;
+  NSArray *previewBlock = [lines subarrayWithRange:NSMakeRange((NSUInteger)previewLine, (NSUInteger)(previewEndLine - previewLine + 1))];
+  [lines removeObjectsInRange:NSMakeRange((NSUInteger)previewLine, (NSUInteger)(previewEndLine - previewLine + 1))];
+  NSInteger adjustedTypeEndLine = typeEndLine - (previewEndLine - previewLine + 1);
+  while (adjustedTypeEndLine > 0 && [lines[(NSUInteger)adjustedTypeEndLine - 1] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].length == 0) {
+    [lines removeObjectAtIndex:(NSUInteger)adjustedTypeEndLine - 1];
+    adjustedTypeEndLine--;
+  }
+  NSMutableArray *cleanPreview = [NSMutableArray array];
+  for (NSString *line in previewBlock) [cleanPreview addObject:[line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]];
+  NSUInteger insertIndex = MIN((NSUInteger)adjustedTypeEndLine + 1, lines.count);
+  [lines insertObject:@"" atIndex:insertIndex++];
+  for (NSString *line in cleanPreview) [lines insertObject:line atIndex:insertIndex++];
+  if (changedLines) (*changedLines)++;
+  [actions addObject:@"I moved #Preview outside the SwiftUI view type."];
+  return [self fishIndentedCode:[lines componentsJoinedByString:@"\n"]];
+}
+- (NSInteger)fishCountCharacter:(unichar)needle inString:(NSString *)text {
+  NSInteger count = 0;
+  for (NSUInteger i = 0; i < text.length; i++) if ([text characterAtIndex:i] == needle) count++;
+  return count;
+}
+- (NSInteger)fishEditDistance:(NSString *)a to:(NSString *)b limit:(NSInteger)limit {
+  if (labs((long)a.length - (long)b.length) > limit) return limit + 1;
+  NSMutableArray<NSNumber *> *prev = [NSMutableArray array];
+  for (NSUInteger j = 0; j <= b.length; j++) [prev addObject:@(j)];
+  for (NSUInteger i = 1; i <= a.length; i++) {
+    NSMutableArray<NSNumber *> *row = [NSMutableArray arrayWithObject:@(i)];
+    NSInteger best = i;
+    unichar ca = [a characterAtIndex:i - 1];
+    for (NSUInteger j = 1; j <= b.length; j++) {
+      unichar cb = [b characterAtIndex:j - 1];
+      NSInteger cost = ca == cb ? 0 : 1;
+      NSInteger del = prev[j].integerValue + 1;
+      NSInteger ins = row[j - 1].integerValue + 1;
+      NSInteger sub = prev[j - 1].integerValue + cost;
+      NSInteger v = MIN(MIN(del, ins), sub);
+      [row addObject:@(v)];
+      best = MIN(best, v);
+    }
+    if (best > limit) return limit + 1;
+    prev = row;
+  }
+  return prev.lastObject.integerValue;
+}
+- (NSString *)fishClosestToken:(NSString *)token from:(NSArray<NSString *> *)known maxDistance:(NSInteger)maxDistance {
+  NSString *best = nil;
+  NSInteger bestDistance = maxDistance + 1;
+  for (NSString *candidate in known) {
+    NSInteger distance = [self fishEditDistance:token to:candidate limit:maxDistance];
+    if (distance < bestDistance) { bestDistance = distance; best = candidate; }
+  }
+  return bestDistance <= maxDistance ? best : nil;
+}
+- (NSArray<NSString *> *)fishKnownSwiftTokens {
+  return @[@"import", @"SwiftUI", @"State", @"private", @"var", @"let", @"Bool", @"false", @"true", @"some", @"body", @"View", @"systemName", @"imageScale", @"foregroundStyle", @"tint", @"padding", @"Preview", @"ContentView", @"toggle", @"Text", @"Image", @"Toggle", @"VStack", @"HStack", @"ZStack", @"Color", @"red", @"blue", @"green", @"black", @"white"];
+}
+- (NSString *)fishApplyFuzzyCorrectionsToLine:(NSString *)line actions:(NSMutableArray<NSString *> *)actions {
+  NSArray *known = [self fishKnownSwiftTokens];
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"[A-Za-z_][A-Za-z0-9_]*" options:0 error:nil];
+  NSMutableString *out = [NSMutableString string];
+  __block NSUInteger cursor = 0;
+  [regex enumerateMatchesInString:line options:0 range:NSMakeRange(0, line.length) usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
+    NSRange r = result.range;
+    [out appendString:[line substringWithRange:NSMakeRange(cursor, r.location - cursor)]];
+    NSString *word = [line substringWithRange:r];
+    NSString *fixed = [self fishClosestToken:word from:known maxDistance:(word.length > 8 ? 3 : 2)];
+    if (fixed && ![fixed isEqualToString:word]) {
+      [out appendString:fixed];
+      [actions addObject:[NSString stringWithFormat:@"I corrected %@ to %@.", word, fixed]];
+    } else {
+      [out appendString:word];
+    }
+    cursor = NSMaxRange(r);
+  }];
+  [out appendString:[line substringFromIndex:cursor]];
+  return out;
+}
+- (BOOL)fishLooksLikeSwiftUIImport:(NSString *)line {
+  NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+  if (![trimmed hasPrefix:@"import "] && ![trimmed hasPrefix:@"ilmport "]) return NO;
+  NSString *module = [[trimmed substringFromIndex:([trimmed hasPrefix:@"ilmport "] ? 8 : 7)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+  if ([module isEqualToString:@"SwiftUI"]) return NO;
+  NSSet *knownTypos = [NSSet setWithArray:@[@"SwiftUIL", @"SwifttUI", @"SwiftUi", @"SwilftUI", @"SwfitUI", @"SwiiftUI", @"SwiftU", @"SwiftUII"]];
+  if ([knownTypos containsObject:module]) return YES;
+  NSString *lower = module.lowercaseString;
+  return [lower containsString:@"swift"] && ([lower containsString:@"ui"] || [lower hasSuffix:@"u"]);
+}
+- (NSString *)fishFirstUsefulCompilerLine:(NSString *)output {
+  for (NSString *line in [output componentsSeparatedByString:@"\n"]) {
+    NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if ([trimmed containsString:@"error:"] || [trimmed containsString:@"warning:"]) return trimmed;
+  }
+  NSString *trimmed = [output stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  return trimmed.length ? trimmed : @"Swift did not print an error.";
+}
+- (NSString *)fishCodeForTypecheck:(NSString *)source {
+  NSMutableString *out = [NSMutableString string];
+  NSArray *lines = [source componentsSeparatedByString:@"\n"];
+  BOOL skipping = NO;
+  NSInteger depth = 0;
+  for (NSString *line in lines) {
+    if (!skipping && [line rangeOfString:@"#Preview"].location != NSNotFound) { skipping = YES; depth = 0; }
+    if (skipping) {
+      for (NSUInteger i = 0; i < line.length; i++) {
+        unichar c = [line characterAtIndex:i];
+        if (c == '{') depth++;
+        if (c == '}') depth--;
+      }
+      if (depth <= 0 && [line rangeOfString:@"}"].location != NSNotFound) skipping = NO;
+      continue;
+    }
+    [out appendFormat:@"%@\n", line];
+  }
+  return out;
+}
+- (NSDictionary *)fishCompileCode:(NSString *)code {
+  NSDate *started = NSDate.date;
+  NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"swiftstudio-fishy-%.0f", NSDate.date.timeIntervalSince1970 * 1000]];
+  [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+  NSString *path = [dir stringByAppendingPathComponent:@"ContentView.swift"];
+  NSError *writeError = nil;
+  NSString *typecheckCode = [self fishCodeForTypecheck:code];
+  if (![typecheckCode writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&writeError]) {
+    return @{@"ok":@NO, @"seconds":@(MAX(1, ceil(-started.timeIntervalSinceNow))), @"output":writeError.localizedDescription ?: @"Could not write temporary Swift file."};
+  }
+  NSTask *task = [NSTask new];
+  task.launchPath = @"/usr/bin/xcrun";
+  task.arguments = @[@"swiftc", @"-typecheck", path];
+  NSPipe *pipe = [NSPipe pipe];
+  task.standardOutput = pipe;
+  task.standardError = pipe;
+  @try {
+    [task launch];
+    [task waitUntilExit];
+  } @catch (NSException *exception) {
+    return @{@"ok":@NO, @"seconds":@(MAX(1, ceil(-started.timeIntervalSinceNow))), @"output":@"Could not run swiftc. Install Xcode Command Line Tools with xcode-select --install."};
+  }
+  NSData *data = [[pipe fileHandleForReading] readDataToEndOfFile];
+  NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+  NSInteger seconds = MAX(1, (NSInteger)ceil(-started.timeIntervalSinceNow));
+  [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
+  return @{@"ok":@(task.terminationStatus == 0), @"seconds":@(seconds), @"output":output};
+}
+- (NSString *)fishImplementedCodeFromCode:(NSString *)code actions:(NSMutableArray<NSString *> *)actions changedLines:(NSUInteger *)changedLines {
+  NSArray *beforeLines = [code componentsSeparatedByString:@"\n"];
+  NSMutableArray *lines = [NSMutableArray array];
+  for (NSString *rawLine in beforeLines) {
+    NSString *line = rawLine;
+    NSString *original = line;
+    line = [self fishApplyFuzzyCorrectionsToLine:line actions:actions];
+    if ([self fishLooksLikeSwiftUIImport:line]) {
+      NSString *leading = @"";
+      for (NSUInteger i = 0; i < line.length; i++) {
+        unichar c = [line characterAtIndex:i];
+        if (c == ' ' || c == '\t') leading = [leading stringByAppendingFormat:@"%C", c]; else break;
+      }
+      line = [leading stringByAppendingString:@"import SwiftUI"];
+      [actions addObject:@"I fixed the SwiftUI import so Swift can find the module."];
+    }
+    NSDictionary *replacements = @{
+      @"@Spate": @"@State",
+      @" vaer ": @" var ",
+      @": Bokol": @": Bool",
+      @"= faelse": @"= false",
+      @"systeemName:": @"systemName:",
+      @".foregroundstyle": @".foregroundStyle",
+      @".tit": @".tint",
+      @"#Pneview": @"#Preview",
+      @"CondentView": @"ContentView",
+      @"toggsle": @"toggle"
+    };
+    for (NSString *bad in replacements) {
+      if ([line containsString:bad]) {
+        line = [line stringByReplacingOccurrencesOfString:bad withString:replacements[bad]];
+        [actions addObject:[NSString stringWithFormat:@"I corrected %@ to %@.", bad, replacements[bad]]];
+      }
+    }
+    if ([line containsString:@"letvar"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"letvar" withString:@"var"];
+      [actions addObject:@"I split the merged let/var keyword into a valid var declaration."];
+    }
+    if ([line containsString:@"var body:  some View"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"var body:  some View" withString:@"var body: some View"];
+      [actions addObject:@"I fixed the extra space in the body declaration."];
+    }
+    if ([line containsString:@"$Preview"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"$Preview" withString:@"#Preview"];
+      [actions addObject:@"I changed $Preview to the Swift macro #Preview."];
+    }
+    if ([line containsString:@"#Macro"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"#Macro" withString:@"#Preview"];
+      [actions addObject:@"I changed #Macro to #Preview."];
+    }
+    if ([line containsString:@"Colorred"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"Colorred" withString:@"Color.red"];
+      [actions addObject:@"I changed Colorred to Color.red."];
+    }
+    if ([line containsString:@"ContentViewsssss"]) {
+      line = [line stringByReplacingOccurrencesOfString:@"ContentViewsssss" withString:@"ContentView"];
+      [actions addObject:@"I changed ContentViewsssss() to ContentView()."];
+    }
+    NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if ([trimmed isEqualToString:@".imageScale.large)"]) {
+      line = [line stringByReplacingOccurrencesOfString:@".imageScale.large)" withString:@".imageScale(.large)"];
+      [actions addObject:@"I changed imageScale.large) to imageScale(.large)."];
+    }
+    if ([trimmed isEqualToString:@"padding()"] || [trimmed isEqualToString:@".padding"]) {
+      NSString *leading = [line substringToIndex:[line rangeOfString:trimmed].location];
+      line = [leading stringByAppendingString:@".padding()"];
+      [actions addObject:@"I fixed padding into a SwiftUI modifier call."];
+    }
+    if ([trimmed hasPrefix:@"Toggle("] && [self fishCountCharacter:'(' inString:line] > [self fishCountCharacter:')' inString:line]) {
+      line = [line stringByAppendingString:@")"];
+      [actions addObject:@"I closed the Toggle call."];
+    }
+    if ([trimmed hasPrefix:@"Text("] && [self fishCountCharacter:'"' inString:line] % 2 == 1) {
+      if ([line hasSuffix:@")"]) line = [line substringToIndex:line.length - 1];
+      line = [line stringByAppendingString:@"\")"];
+      [actions addObject:@"I closed the unfinished Text string."];
+    }
+    if ([trimmed containsString:@".foregroundStyle("] && [self fishCountCharacter:'(' inString:line] > [self fishCountCharacter:')' inString:line]) {
+      line = [line stringByAppendingString:@")"];
+      [actions addObject:@"I closed the foregroundStyle call."];
+    }
+    if (![line isEqualToString:original] && changedLines) (*changedLines)++;
+    [lines addObject:line];
+  }
+  NSInteger parenBalance = 0;
+  for (NSString *line in lines) parenBalance += [self fishCountCharacter:'(' inString:line] - [self fishCountCharacter:')' inString:line];
+  if (parenBalance < 0) {
+    NSMutableArray *cleaned = [NSMutableArray array];
+    NSInteger extraClosers = -parenBalance;
+    for (NSString *line in lines) {
+      NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+      if (extraClosers > 0 && [trimmed isEqualToString:@")"]) {
+        extraClosers--;
+        if (changedLines) (*changedLines)++;
+        [actions addObject:@"I removed an extra standalone closing parenthesis."];
+        continue;
+      }
+      [cleaned addObject:line];
+    }
+    lines = cleaned;
+  }
+  NSInteger braceBalance = 0;
+  for (NSString *line in lines) {
+    NSDictionary *counts = [self fishBraceCountsInLine:line];
+    braceBalance += [counts[@"opens"] integerValue] - [counts[@"closes"] integerValue];
+  }
+  while (braceBalance > 0) {
+    [lines addObject:@"}"];
+    braceBalance--;
+    if (changedLines) (*changedLines)++;
+    [actions addObject:@"Swift expected another closing brace, so I added one at the end of the file."];
+  }
+  NSString *implemented = [self fishIndentedCode:[lines componentsJoinedByString:@"\n"]];
+  if ([implemented containsString:@"Text(\"Hello\")\n        .foregroundStyle(Color.red)"]) {
+    implemented = [implemented stringByReplacingOccurrencesOfString:@"Text(\"Hello\")\n        .foregroundStyle(Color.red)" withString:@"Text(\"Hello\")\n            .foregroundStyle(Color.red)"];
+    if (changedLines) (*changedLines)++;
+    [actions addObject:@"I attached the foregroundStyle modifier to the Text view inside body."];
+  }
+  return implemented;
+}
+- (NSString *)fishRepairViewConformanceInCode:(NSString *)code actions:(NSMutableArray<NSString *> *)actions changedLines:(NSUInteger *)changedLines {
+  if (![code containsString:@"struct ContentView: View"] || ![code containsString:@"var body: some View"]) return code;
+  NSMutableArray *lines = [[code componentsSeparatedByString:@"\n"] mutableCopy];
+  BOOL inBody = NO;
+  NSInteger bodyDepth = 0;
+  BOOL changed = NO;
+  for (NSUInteger i = 0; i < lines.count; i++) {
+    NSString *line = lines[i];
+    NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if ([trimmed hasPrefix:@"var body: some View"]) {
+      inBody = YES;
+      NSDictionary *counts = [self fishBraceCountsInLine:line];
+      bodyDepth = [counts[@"opens"] integerValue] - [counts[@"closes"] integerValue];
+      continue;
+    }
+    if (inBody) {
+      NSDictionary *counts = [self fishBraceCountsInLine:line];
+      bodyDepth += [counts[@"opens"] integerValue] - [counts[@"closes"] integerValue];
+      if ([trimmed hasPrefix:@"."] && ![line hasPrefix:@"            "]) {
+        lines[i] = [@"            " stringByAppendingString:trimmed];
+        changed = YES;
+      }
+      if (bodyDepth <= 0) inBody = NO;
+    }
+  }
+  if (!changed) return code;
+  if (changedLines) (*changedLines)++;
+  [actions addObject:@"Swift said ContentView did not conform to View, so I normalized the body/modifier structure."];
+  return [self fishIndentedCode:[lines componentsJoinedByString:@"\n"]];
+}
+- (NSArray<NSString *> *)fishQuotedCompilerSymbols:(NSString *)output {
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"'([^']+)'" options:0 error:nil];
+  NSArray *matches = [regex matchesInString:output ?: @"" options:0 range:NSMakeRange(0, (output ?: @"").length)];
+  NSMutableArray *symbols = [NSMutableArray array];
+  for (NSTextCheckingResult *match in matches) {
+    NSRange r = [match rangeAtIndex:1];
+    if (r.location != NSNotFound) [symbols addObject:[output substringWithRange:r]];
+  }
+  return symbols;
+}
+- (NSString *)fishReplacingIdentifier:(NSString *)bad with:(NSString *)good inCode:(NSString *)code changed:(BOOL *)changed {
+  NSString *pattern = [NSString stringWithFormat:@"\\b%@\\b", [NSRegularExpression escapedPatternForString:bad]];
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+  NSString *next = [regex stringByReplacingMatchesInString:code options:0 range:NSMakeRange(0, code.length) withTemplate:good];
+  if (![next isEqualToString:code] && changed) *changed = YES;
+  return next;
+}
+- (NSString *)fishRepairLineShapesInCode:(NSString *)code actions:(NSMutableArray<NSString *> *)actions changedLines:(NSUInteger *)changedLines {
+  NSMutableArray *lines = [[code componentsSeparatedByString:@"\n"] mutableCopy];
+  BOOL changed = NO;
+  for (NSUInteger i = 0; i < lines.count; i++) {
+    NSString *line = lines[i];
+    NSString *original = line;
+    NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    if ([trimmed hasPrefix:@".imageScale."]) {
+      line = [line stringByReplacingOccurrencesOfString:@".imageScale." withString:@".imageScale(."];
+      if (![line containsString:@")"]) line = [line stringByAppendingString:@")"];
+      else if (![line containsString:@".imageScale(."]) line = [line stringByReplacingOccurrencesOfString:@")" withString:@")"];
+      [actions addObject:@"I turned imageScale into a normal SwiftUI modifier call."];
+    }
+    if ([trimmed hasPrefix:@"Text("] && [self fishCountCharacter:'"' inString:line] % 2 == 1) {
+      while ([line hasSuffix:@")"]) line = [line substringToIndex:line.length - 1];
+      line = [line stringByAppendingString:@"\")"];
+      [actions addObject:@"I closed the unfinished Text string."];
+    }
+    if (([trimmed hasPrefix:@"Image("] || [trimmed hasPrefix:@"Toggle("]) && [self fishCountCharacter:'(' inString:line] > [self fishCountCharacter:')' inString:line]) {
+      line = [line stringByAppendingString:@")"];
+      [actions addObject:@"I closed an unfinished SwiftUI call."];
+    }
+    if ([trimmed isEqualToString:@"padding"] || [trimmed isEqualToString:@"padding()"] || [trimmed isEqualToString:@".padding"]) {
+      NSString *leading = [line substringToIndex:[line rangeOfString:trimmed].location];
+      line = [leading stringByAppendingString:@".padding()"];
+      [actions addObject:@"I changed padding into the SwiftUI modifier .padding()."];
+    }
+    if (![line isEqualToString:original]) {
+      lines[i] = line;
+      changed = YES;
+      if (changedLines) (*changedLines)++;
+    }
+  }
+  return changed ? [self fishIndentedCode:[lines componentsJoinedByString:@"\n"]] : code;
+}
+- (NSString *)fishRepairUsingCompilerOutput:(NSString *)code output:(NSString *)output actions:(NSMutableArray<NSString *> *)actions changedLines:(NSUInteger *)changedLines {
+  if (!output.length) return code;
+  NSString *next = code;
+  BOOL changed = NO;
+  NSArray *known = [self fishKnownSwiftTokens];
+  for (NSString *symbol in [self fishQuotedCompilerSymbols:output]) {
+    if (!symbol.length) continue;
+    NSString *fixed = [self fishClosestToken:symbol from:known maxDistance:(symbol.length > 8 ? 4 : 2)];
+    if (!fixed || [fixed isEqualToString:symbol]) continue;
+    if ([output containsString:@"no such module"] && [fixed isEqualToString:@"SwiftUI"]) {
+      next = [next stringByReplacingOccurrencesOfString:[NSString stringWithFormat:@"import %@", symbol] withString:@"import SwiftUI"];
+      next = [next stringByReplacingOccurrencesOfString:[NSString stringWithFormat:@"ilmport %@", symbol] withString:@"import SwiftUI"];
+      changed = YES;
+      [actions addObject:@"I fixed the SwiftUI import because Swift could not find that module."];
+    } else if ([output containsString:@"cannot find"] || [output containsString:@"has no member"] || [output containsString:@"cannot infer"]) {
+      BOOL didReplace = NO;
+      next = [self fishReplacingIdentifier:symbol with:fixed inCode:next changed:&didReplace];
+      if (didReplace) {
+        changed = YES;
+        [actions addObject:[NSString stringWithFormat:@"Swift could not understand %@, so I changed it to %@.", symbol, fixed]];
+      }
+    }
+  }
+  if ([output containsString:@"unterminated string literal"] || [output containsString:@"expected ')'"] || [output containsString:@"expected member name following '.'"]) {
+    NSString *repaired = [self fishRepairLineShapesInCode:next actions:actions changedLines:changedLines];
+    if (![repaired isEqualToString:next]) { next = repaired; changed = YES; }
+  }
+  if ([output containsString:@"does not conform to protocol 'View'"]) {
+    NSString *repaired = [self fishRepairViewConformanceInCode:next actions:actions changedLines:changedLines];
+    if (![repaired isEqualToString:next]) { next = repaired; changed = YES; }
+  }
+  if ([output containsString:@"expected '}'"] || [output containsString:@"expected declaration"]) {
+    NSString *repaired = [self fishImplementedCodeFromCode:next actions:actions changedLines:changedLines];
+    if (![repaired isEqualToString:next]) { next = repaired; changed = YES; }
+  }
+  return changed ? [self fishIndentedCode:next] : code;
+}
+- (void)fishySetPanelText:(NSString *)text {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    self.consoleLog = [text mutableCopy];
+    [self refreshConsole:nil];
+  });
+}
+- (void)fishyImplement {
+  self.fishyPanelMode = NO;
+  self.fishyBubbleText = nil;
+  self.consoleLog = [@"🐠: Implementing changes...\n" mutableCopy];
+  [self refreshConsole:nil];
+  NSString *before = [self fishCurrentCode];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    NSMutableArray<NSString *> *actions = [NSMutableArray array];
+    __block NSUInteger changedLines = 0;
+    NSDictionary *lastCompile = [self fishCompileCode:before];
+    __block NSString *after = before;
+    for (NSUInteger pass = 0; pass < 8; pass++) {
+      NSMutableArray<NSString *> *passActions = [NSMutableArray array];
+      NSString *generic = [self fishImplementedCodeFromCode:after actions:passActions changedLines:&changedLines];
+      NSString *compilerRepaired = [self fishRepairUsingCompilerOutput:generic output:lastCompile[@"output"] ?: @"" actions:passActions changedLines:&changedLines];
+      if ([compilerRepaired isEqualToString:after]) break;
+      after = compilerRepaired;
+      [actions addObjectsFromArray:passActions];
+      lastCompile = [self fishCompileCode:after];
+      if ([lastCompile[@"ok"] boolValue]) break;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      BOOL usedSwiftFormat = NO;
+      NSString *hoistedPreview = [self fishMovePreviewMacroOutsideTypeInCode:after actions:actions changedLines:&changedLines];
+      if (![hoistedPreview isEqualToString:after]) after = hoistedPreview;
+      if ([lastCompile[@"ok"] boolValue]) {
+        NSString *formatted = [self fishBestFormattedCode:after usedSwiftFormat:&usedSwiftFormat];
+        if (![formatted isEqualToString:after]) {
+          after = formatted;
+          [actions addObject:@"I ran swift-format after Swift accepted the repaired code."];
+        }
+      }
+      [self fishSetCurrentCode:after];
+      self.fishyPanelMode = NO;
+      self.fishyBubbleText = nil;
+      self.consoleLog = [@"🐠: Implemented changes.\n" mutableCopy];
+      [self appendPromptToConsoleLog];
+      [self refreshConsole:nil];
+    });
+  });
+}
+- (void)closeFishyPanel:(id)sender {
+  self.fishyPanelMode = NO;
+  self.fishyBubbleText = nil;
+  [self appendPromptToConsoleLog];
+  [self showProject];
+}
+- (void)fishSuggest {
+  NSString *source = [self fishCurrentCode];
+  NSString *fileName = [self file][@"name"] ?: self.activeFileID ?: @"ContentView";
+  NSString *requestID = [NSString stringWithFormat:@"fish-%.0f", NSDate.date.timeIntervalSince1970 * 1000];
+  NSError *error = nil;
+  BOOL ok = PatchDocument(@"Threads/Fishy", @{@"status":@"queued", @"kind":@"suggest", @"requestId":requestID, @"source":source, @"fileName":fileName, @"appName":[self project][@"name"] ?: @"SwiftUI App", @"sentAt":NSDate.date, @"result":@"", @"error":@""}, &error);
+  if (!ok) {
+    [self.consoleLog appendFormat:@"🐠: Suggest failed: %@\n", error.localizedDescription ?: @"Firestore write failed"];
+    [self appendPromptToConsoleLog];
+    [self refreshConsole:nil];
+    return;
+  }
+  self.consoleLog = [@"🐠: Asking preview runner for suggestions...\n" mutableCopy];
+  [self refreshConsole:nil];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    NSString *result = nil;
+    NSString *failure = nil;
+    for (NSUInteger i = 0; i < 45; i++) {
+      [NSThread sleepForTimeInterval:1.0];
+      NSError *readError = nil;
+      NSDictionary *doc = GetDocument(@"Threads/Fishy", &readError);
+      if (readError) { failure = readError.localizedDescription; continue; }
+      if (![doc[@"requestId"] isEqualToString:requestID]) continue;
+      NSString *status = doc[@"status"] ?: @"";
+      if ([status isEqualToString:@"complete"]) { result = doc[@"result"] ?: @"🐠: No suggestions."; break; }
+      if ([status isEqualToString:@"error"]) { failure = doc[@"error"] ?: @"Runner could not make suggestions."; break; }
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self.consoleLog = [[NSString stringWithFormat:@"%@\n", result ?: [NSString stringWithFormat:@"🐠: %@", failure ?: @"Runner did not answer."]] mutableCopy];
+      [self appendPromptToConsoleLog];
+      [self refreshConsole:nil];
+    });
+  });
+}
+- (void)runTerminalCommand:(NSString *)command {
+  if (!command.length) { [self appendPromptToConsoleLog]; [self refreshConsole:nil]; return; }
+  if ([command isEqualToString:@"studio run"]) {
+    self.fishyPanelMode = NO;
+    [self.consoleLog appendString:@"Running program\n"];
+    self.keepConsoleLogForNextSend = YES;
+    self.compileOnlyRequest = NO;
+    [self sendForPreview:nil];
+    return;
+  }
+  if ([command isEqualToString:@"studio compile"]) {
+    self.fishyPanelMode = NO;
+    [self.consoleLog appendString:@"Compiling program\n"];
+    self.keepConsoleLogForNextSend = YES;
+    self.compileOnlyRequest = YES;
+    [self sendForPreview:nil];
+    return;
+  }
+  if ([command isEqualToString:@"studio share"]) {
+    self.fishyPanelMode = NO;
+    [self.consoleLog appendString:@"Sharing program\n"];
+    [self shareProject:nil];
+    [self appendPromptToConsoleLog];
+    [self refreshConsole:nil];
+    return;
+  }
+  if ([command isEqualToString:@"studio stop"]) {
+    self.fishyPanelMode = NO;
+    [self stopPreview:nil];
+    return;
+  }
+  if ([command isEqualToString:@"fish cleanup"]) {
+    self.fishyPanelMode = NO;
+    [self fishCleanup:NO];
+    return;
+  }
+  if ([command isEqualToString:@"fish suggest"]) {
+    self.fishyPanelMode = NO;
+    [self fishSuggest];
+    return;
+  }
+  if ([command isEqualToString:@"fish implement"]) {
+    [self fishyImplement];
+    return;
+  }
+  [self.consoleLog appendString:@"studioterm: no such command\n"];
+  [self appendPromptToConsoleLog];
+  [self refreshConsole:nil];
+}
 - (void)shareProject:(id)sender {
   [self saveEditor];
   NSString *requestID = [NSString stringWithFormat:@"studio-%.0f", NSDate.date.timeIntervalSince1970 * 1000];
@@ -573,6 +1449,11 @@ static void UpdateHistory(NSString *appName) {
 }
 - (void)stopPreview:(id)sender {
   [self clearPreviewSilently];
+  self.pendingRequestID = nil;
+  self.compileOnlyRequest = NO;
+  self.lastSendPercent = 0;
+  self.lastCompilePercent = 0;
+  self.lastRunPercent = 0;
   [self appendConsole:@"Stopped preview"];
   if (self.showingProject) [self showProject];
 }
@@ -756,7 +1637,11 @@ static void UpdateHistory(NSString *appName) {
 - (void)appendConsole:(NSString *)line { if (!self.consoleLog) self.consoleLog = [NSMutableString string]; if (line.length) [self.consoleLog appendFormat:@"%@\n", line]; [self refreshConsole:nil]; }
 - (void)refreshConsole:(id)sender {
   if (!self.console) return;
-  if (!self.pendingRequestID) { self.console.string = self.consoleLog ?: @""; [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)]; return; }
+  if (!self.pendingRequestID) {
+    [self appendPromptToConsoleLog];
+    [self showConsoleText:self.consoleLog inputAtEnd:YES];
+    return;
+  }
   NSTimeInterval age = self.lastPercentFetchAt ? -self.lastPercentFetchAt.timeIntervalSinceNow : DBL_MAX;
   if (age >= 1.25) {
     double send = [GetDocument(@"Percent/Send", nil)[@"%"] doubleValue];
@@ -770,19 +1655,22 @@ static void UpdateHistory(NSString *appName) {
   double send = self.lastSendPercent;
   double compile = self.lastCompilePercent;
   double run = self.lastRunPercent;
-  NSMutableString *text = [NSMutableString stringWithFormat:@"Sending...%@ %.0f%%\nCompiling...%@ %.0f%%\nRunning...%@ %.0f%%\n", [self bar:send], send, [self bar:compile], compile, [self bar:run], run];
+  NSMutableString *text = self.compileOnlyRequest
+    ? [NSMutableString stringWithFormat:@"Sending...%@ %.0f%%\nCompiling...%@ %.0f%%\n", [self bar:send], send, [self bar:compile], compile]
+    : [NSMutableString stringWithFormat:@"Sending...%@ %.0f%%\nCompiling...%@ %.0f%%\nRunning...%@ %.0f%%\n", [self bar:send], send, [self bar:compile], compile, [self bar:run], run];
   [text appendString:self.consoleLog ?: @""];
-  self.console.string = text;
-  [self.console scrollRangeToVisible:NSMakeRange(self.console.string.length, 0)];
+  [self showConsoleText:text inputAtEnd:NO];
 }
 - (void)sendForPreview:(id)sender {
-  [self saveEditor]; self.consoleLog = [NSMutableString string]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 5; self.lastCompilePercent = 0; self.lastRunPercent = 0; self.lastPercentFetchAt = NSDate.date; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); SetPercent(@"Run", 0); [self refreshConsole:nil];
+  if (sender) self.compileOnlyRequest = NO;
+  BOOL compileOnly = self.compileOnlyRequest;
+  [self saveEditor]; if (self.keepConsoleLogForNextSend) self.keepConsoleLogForNextSend = NO; else self.consoleLog = [NSMutableString string]; self.pendingRequestID = [NSString stringWithFormat:@"%.0f", NSDate.date.timeIntervalSince1970 * 1000]; self.lastSendPercent = 5; self.lastCompilePercent = 0; self.lastRunPercent = 0; self.lastPercentFetchAt = NSDate.date; SetPercent(@"Send", 5); SetPercent(@"Compile", 0); SetPercent(@"Run", 0); [self refreshConsole:nil];
   NSDictionary *p = [self project]; NSError *error = nil;
   self.lastSendPercent = 35; SetPercent(@"Send", 35);
   NSString *source = [self combinedSource];
   self.lastSendPercent = 70; SetPercent(@"Send", 70);
-  BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"previewArch":ProcessArch(), @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date, @"compiledRequestId":@"", @"compiledChunkCount":@0, @"compiledSize":@0}, &error);
-  self.lastSendPercent = ok ? 100 : 0; SetPercent(@"Send", ok ? 100 : 0); [self refreshConsole:nil]; if (!ok) { [self appendConsole:[NSString stringWithFormat:@"Send failed: %@", error.localizedDescription]]; self.pendingRequestID = nil; [self refreshConsole:nil]; return; }
+  BOOL ok = PatchDocument([NSString stringWithFormat:@"Threads/%@", self.initialThread ?: @"Thread1"], @{@"send":source, @"appName":p[@"name"] ?: @"SwiftUI App", @"requestId":self.pendingRequestID, @"previewArch":ProcessArch(), @"compileOnly":@(compileOnly), @"status":@"queued", @"preview":@"", @"error":@"", @"sentAt":NSDate.date, @"compiledRequestId":@"", @"compiledChunkCount":@0, @"compiledSize":@0}, &error);
+  self.lastSendPercent = ok ? 100 : 0; SetPercent(@"Send", ok ? 100 : 0); [self refreshConsole:nil]; if (!ok) { [self appendConsole:[NSString stringWithFormat:@"Send failed: %@", error.localizedDescription]]; self.pendingRequestID = nil; self.compileOnlyRequest = NO; [self appendPromptToConsoleLog]; [self refreshConsole:nil]; return; }
   [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 - (void)checkPreview:(id)sender {
@@ -790,6 +1678,18 @@ static void UpdateHistory(NSString *appName) {
   if (self.pendingRequestID && ![doc[@"requestId"] isEqualToString:self.pendingRequestID]) { [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO]; return; }
   NSString *status = doc[@"status"] ?: @""; if ([status isEqualToString:@"complete"] || [status isEqualToString:@"error"]) {
     if ([status isEqualToString:@"complete"]) {
+      if (self.compileOnlyRequest) {
+        if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
+        [self appendConsole:@"Compile complete"];
+        self.pendingRequestID = nil;
+        self.compileOnlyRequest = NO;
+        self.lastSendPercent = 0;
+        self.lastCompilePercent = 0;
+        self.lastRunPercent = 0;
+        [self appendPromptToConsoleLog];
+        [self refreshConsole:nil];
+        return;
+      }
       NSString *compiledRequestID = doc[@"compiledRequestId"];
       NSNumber *compiledChunkCount = doc[@"compiledChunkCount"];
       if (![compiledRequestID isEqualToString:self.pendingRequestID] || compiledChunkCount.integerValue <= 0) {
@@ -811,9 +1711,11 @@ static void UpdateHistory(NSString *appName) {
           if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]];
           self.pendingRequestID = nil;
           self.openingPreview = NO;
+          self.compileOnlyRequest = NO;
           self.lastSendPercent = 0;
           self.lastCompilePercent = 0;
           self.lastRunPercent = 0;
+          [self appendPromptToConsoleLog];
           [self refreshConsole:nil];
         });
       });
@@ -821,7 +1723,7 @@ static void UpdateHistory(NSString *appName) {
     } else {
       if ([doc[@"preview"] length]) [self appendConsole:doc[@"preview"]];
     }
-    if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; [self refreshConsole:nil]; return; }
+    if ([doc[@"error"] length]) [self appendConsole:doc[@"error"]]; self.pendingRequestID = nil; self.compileOnlyRequest = NO; self.lastSendPercent = 0; self.lastCompilePercent = 0; self.lastRunPercent = 0; [self appendPromptToConsoleLog]; [self refreshConsole:nil]; return; }
   [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(checkPreview:) userInfo:nil repeats:NO];
 }
 @end
