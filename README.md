@@ -143,22 +143,64 @@ topButtons     header buttons that switch the displayed page content
 subtitles      subtitle text blocks
 cards          tappable cards; each card can open custom detail content
 piCharts       simple circular slice charts
+textFields     capsule text fields with thick white outlines
 order          semicolon-separated layout order
 backgroundStyle  "mercury", "wood", "elegant", "cleanWebsite", "navBar", or "nested"
 headerColor    optional header color for website/nav templates
+buttonColor    optional nav bar button/link color
 ```
 
-`order` supports:
+Standalone template components:
+
+```swift
+TemplateTitle("My text")
+TemplateSubtitle("My other text")
+TemplateTitleImage("bird")
+TemplateTopButton("My button", mutates: false, singleUse: false) {
+    Text("Button content")
+}
+TemplateCard(title: "My card", status: "Its status", mutates: false, singleUse: false) {
+    Text("Card content")
+}
+TemplatePiChart(values: [35, 25, 40], colors: [.blue, .purple, .orange])
+TemplateField("Type here...", value: $textfield)
+```
+
+Use these inside top button pages, card detail content, nested pages, or ordinary SwiftUI stacks when you want the same template styling without adding something to the main `TemplateView(...)` argument lists.
+
+For freely usable buttons and cards, `mutates: true` changes the template page content area to show the supplied content. When `mutates` is false, `singleUse: false` lets the user click again to show/hide the content locally, while `singleUse: true` opens once and stays open.
+
+Text fields can also be added to the main template:
+
+```swift
+@State private var textfield = ""
+
+TemplateView(
+    textFields: [
+        TextField("Type here...", value: $textfield)
+    ],
+    order: "textField1"
+)
+```
+
+`order` supports numbered subtitle and chart tokens:
 
 ```text
 subtitle1
 subtitle2
+subtitle3
+subtitleN
 cards
+textField1
+textField2
+textField3
+textFieldN
 piChart1
 piChart2
+piChartN
 ```
 
-Unknown `order` tokens are ignored.
+For subtitles, any positive number works as long as that item exists in the `subtitles` array. For example, `subtitle3` shows the third subtitle and `subtitle289653548` is accepted too, but it will only show something if you somehow have 289,653,548 subtitles. Unknown or out-of-range `order` tokens are ignored.
 
 Top buttons switch page content:
 
@@ -174,7 +216,7 @@ TopButton("Home") {
 }
 ```
 
-Use `NestedTemplateView` inside top buttons when you want another template page without drawing a second background.
+Use `NestedTemplateView` inside top buttons when you want another template page without drawing a second background. Nested pages do not need a title or title image; you can write `NestedTemplateView(subtitles: [...], order: "subtitle1")`.
 
 Cards open detail pages:
 
@@ -198,7 +240,8 @@ TemplateView(
         TopButton("Our mission") { Text("Mission page") }
     ],
     backgroundStyle: "navBar",
-    headerColor: .green
+    headerColor: .green,
+    buttonColor: .red
 )
 ```
 
