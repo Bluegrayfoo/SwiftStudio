@@ -89,6 +89,136 @@ The preview runner uses that helper for `fish suggest` parser diagnostics. If th
 - Wide preview has a side bar with `>|>` to return to normal width and `>|` to collapse.
 - Red `Stop` button stops hosted previews and older running preview processes started by Studio.
 
+## Templates
+
+On the main projects page, click `Add project from template` to create a starter project. The template picker currently includes:
+
+- `Mercury`: uses `~/studioimages/mercury.heic` as the preview background.
+- `Wood`: uses `~/studioimages/wood.jpeg` as the preview background.
+- `Elegant`: uses a blue, purple, pink, and orange SwiftUI `AngularGradient`.
+- `Clean website`: uses a white page background with a clean website header.
+- `Nav bar`: uses a gray page background with a full-width top navigation bar.
+
+Each template creates two files:
+
+```text
+ContentView
+TemplateView
+```
+
+`ContentView` is the file you edit first. It initializes the template. `TemplateView` contains the reusable layout system.
+
+Basic use:
+
+```swift
+TemplateView(
+    title: "Hello",
+    titleImage: "star.fill",
+    topButtons: [
+        TopButton("About") {
+            Text("About page")
+        }
+    ],
+    subtitles: [
+        Subtitle("A starter page")
+    ],
+    cards: [
+        Card(title: "Status", status: "READY") {
+            Text("Card detail content")
+        }
+    ],
+    piCharts: [
+        PiChart(values: [40, 35, 25], colors: [.blue, .purple, .orange])
+    ],
+    order: "subtitle1;cards;piChart1"
+)
+```
+
+Template arguments:
+
+```text
+title          large page/header title
+titleImage     SF Symbol name, shown with Image(systemName:)
+topButtons     header buttons that switch the displayed page content
+subtitles      subtitle text blocks
+cards          tappable cards; each card can open custom detail content
+piCharts       simple circular slice charts
+order          semicolon-separated layout order
+backgroundStyle  "mercury", "wood", "elegant", "cleanWebsite", "navBar", or "nested"
+headerColor    optional header color for website/nav templates
+```
+
+`order` supports:
+
+```text
+subtitle1
+subtitle2
+cards
+piChart1
+piChart2
+```
+
+Unknown `order` tokens are ignored.
+
+Top buttons switch page content:
+
+```swift
+TopButton("Home") {
+    NestedTemplateView(
+        title: "Home",
+        titleImage: "house.fill",
+        subtitles: [Subtitle("Welcome")],
+        cards: [Card(title: "News", status: "LIVE")],
+        order: "subtitle1;cards"
+    )
+}
+```
+
+Use `NestedTemplateView` inside top buttons when you want another template page without drawing a second background.
+
+Cards open detail pages:
+
+```swift
+Card(title: "Water", status: "CLEAR") {
+    VStack(alignment: .leading, spacing: 8) {
+        Text("Track local water health.")
+        Text("Tap the back button to return.")
+    }
+}
+```
+
+Nav bar example:
+
+```swift
+TemplateView(
+    title: "Protect Fish L.C.C",
+    titleImage: "fish.fill",
+    topButtons: [
+        TopButton("Home") { Text("Home page") },
+        TopButton("Our mission") { Text("Mission page") }
+    ],
+    backgroundStyle: "navBar",
+    headerColor: .green
+)
+```
+
+Clean website example:
+
+```swift
+TemplateView(
+    title: "Starry eyes",
+    titleImage: "star.fill",
+    topButtons: [
+        TopButton("About Us") { Text("About page") },
+        TopButton("Products") { Text("Products page") },
+        TopButton("Donate") { Text("Donate page") }
+    ],
+    backgroundStyle: "cleanWebsite"
+)
+```
+
+Mercury and Wood image templates load their image files at preview runtime. If the image is missing, the template falls back to a dark background.
+
 Install without automatically opening the window:
 
 ```bash

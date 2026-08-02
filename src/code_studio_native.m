@@ -174,6 +174,7 @@ static void UpdateHistory(NSString *appName) {
 @property BOOL fishyPanelMode;
 @property NSString *fishyBubbleText;
 @property BOOL showingChat;
+@property BOOL showingTemplatePicker;
 @property NSArray *chatMessages;
 @property NSString *lastChatSignature;
 @property NSTextView *chatInput;
@@ -388,13 +389,14 @@ static void UpdateHistory(NSString *appName) {
 - (BOOL)previewPaneVisible { return [self isFullScreen] && !self.previewPaneCollapsed; }
 - (void)redrawCurrentPage {
   if (self.showingChat) [self showChatPage];
+  else if (self.showingTemplatePicker) [self showTemplatePicker];
   else if (self.showingProject) [self showProject];
   else [self showMain];
 }
 - (void)updatePreviewPlacement:(id)sender { [self placePreviewContent]; }
-- (void)windowDidResize:(NSNotification *)notification { if (self.showingChat) [self showChatPage]; else if (self.showingProject) { [self saveEditor]; [self showProject]; } [self placePreviewContent]; }
-- (void)windowDidEnterFullScreen:(NSNotification *)notification { self.previewPaneCollapsed = NO; if (self.showingProject) [self showProject]; [self placePreviewContent]; }
-- (void)windowDidExitFullScreen:(NSNotification *)notification { if (self.showingProject) [self showProject]; [self placePreviewContent]; }
+- (void)windowDidResize:(NSNotification *)notification { if (self.showingProject) [self saveEditor]; [self redrawCurrentPage]; [self placePreviewContent]; }
+- (void)windowDidEnterFullScreen:(NSNotification *)notification { self.previewPaneCollapsed = NO; [self redrawCurrentPage]; [self placePreviewContent]; }
+- (void)windowDidExitFullScreen:(NSNotification *)notification { [self redrawCurrentPage]; [self placePreviewContent]; }
 - (BOOL)handleShortcutEvent:(NSEvent *)event {
   NSString *key = event.charactersIgnoringModifiers.lowercaseString ?: @"";
   NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
@@ -445,23 +447,66 @@ static void UpdateHistory(NSString *appName) {
   }
 }
 - (void)showMain {
-  self.showingChat = NO; self.showingProject = NO; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects]; [self label:@"SwiftStudio" frame:NSMakeRect(0,680,1176,72) font:TitleFont(48) color:NSColor.whiteColor].alignment = NSTextAlignmentCenter; [self addLine:NSMakeRect(0,665,1176,2)];
-  CGFloat y = 580; for (NSString *pid in self.projectIDs) {
-    NSDictionary *p = self.store[@"projects"][pid]; BOOL selected = [pid isEqualToString:self.activeProjectID]; NSButton *row = [self button:@"" frame:NSMakeRect(8,y,1160,64) action:@selector(selectProject:) blue:NO]; row.identifier = pid; row.layer.backgroundColor = (selected ? Blue() : DarkRow()).CGColor; row.layer.cornerRadius = 16;
+  self.showingChat = NO; self.showingTemplatePicker = NO; self.showingProject = NO; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects];
+  NSRect b = self.root.bounds;
+  CGFloat headerY = MAX(98, b.size.height - 86);
+  NSTextField *title = [self label:@"SwiftStudio" frame:NSMakeRect(0,headerY,b.size.width,72) font:TitleFont(48) color:NSColor.whiteColor];
+  title.alignment = NSTextAlignmentCenter;
+  [self addLine:NSMakeRect(0,headerY-10,b.size.width,2)];
+
+  CGFloat controlsH = 70;
+  CGFloat listY = controlsH + 14;
+  CGFloat listH = MAX(120, headerY - 36 - listY);
+  NSScrollView *projectScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0,listY,b.size.width,listH)];
+  projectScroll.borderType = NSNoBorder;
+  projectScroll.hasVerticalScroller = YES;
+  projectScroll.drawsBackground = NO;
+  [self tuneScrollView:projectScroll];
+  CGFloat rowW = MAX(360, b.size.width - 20);
+  CGFloat contentH = MAX(listH, self.projectIDs.count * 88 + 12);
+  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0,0,b.size.width,contentH)];
+  CGFloat y = contentH - 76;
+  for (NSString *pid in self.projectIDs) {
+    NSDictionary *p = self.store[@"projects"][pid];
+    BOOL selected = [pid isEqualToString:self.activeProjectID];
+    NSButton *row = [[NSButton alloc] initWithFrame:NSMakeRect(10,y,rowW,64)];
+    row.title = @"";
+    row.bordered = NO;
+    row.target = self;
+    row.action = @selector(selectProject:);
+    row.identifier = pid;
+    row.wantsLayer = YES;
+    row.layer.backgroundColor = (selected ? Blue() : DarkRow()).CGColor;
+    row.layer.cornerRadius = 16;
+    [content addSubview:row];
     self.projectRows[pid] = row;
-    [self label:p[@"name"] frame:NSMakeRect(26,y+13,360,42) font:TitleFont(39) color:NSColor.whiteColor];
-    NSTextField *age = [self label:[self relativeAge:p[@"updatedAt"]] frame:NSMakeRect(390,y+22,160,26) font:TitleFont(20) color:NSColor.lightGrayColor];
+
+    NSTextField *name = [[NSTextField alloc] initWithFrame:NSMakeRect(28,y+13,MIN(360,rowW-210),42)];
+    name.stringValue = p[@"name"] ?: @"Project";
+    name.font = TitleFont(39);
+    name.textColor = NSColor.whiteColor;
+    name.bezeled = NO; name.drawsBackground = NO; name.editable = NO; name.selectable = NO;
+    [content addSubview:name];
+
+    NSTextField *age = [[NSTextField alloc] initWithFrame:NSMakeRect(MIN(390,rowW-170),y+22,160,26)];
+    age.stringValue = [self relativeAge:p[@"updatedAt"]];
+    age.font = TitleFont(20);
+    age.textColor = NSColor.lightGrayColor;
+    age.bezeled = NO; age.drawsBackground = NO; age.editable = NO; age.selectable = NO;
+    [content addSubview:age];
     self.ageLabels[pid] = age;
-    NSButton *hit = [self button:@"" frame:row.frame action:@selector(selectProject:) blue:NO];
-    hit.identifier = pid;
-    hit.layer.backgroundColor = NSColor.clearColor.CGColor;
-    hit.layer.opacity = 0.01;
     y -= 88;
   }
+  projectScroll.documentView = content;
+  [self.dynamicViews addObject:projectScroll];
+  [self.root addSubview:projectScroll];
+  if (contentH > listH) [[projectScroll contentView] scrollToPoint:NSMakePoint(0, contentH - listH)];
+
   [self button:@"+" frame:NSMakeRect(16,18,36,36) action:@selector(newProject:) blue:YES];
   [self button:@"Open" frame:NSMakeRect(62,18,96,36) action:@selector(openSelectedProject:) blue:YES];
   [self button:@"Rename" frame:NSMakeRect(168,18,130,36) action:@selector(renameProject:) blue:YES];
   [self redButton:@"Delete" frame:NSMakeRect(308,18,118,36) action:@selector(deleteProject:)];
+  [self button:@"Add project from template" frame:NSMakeRect(438,18,MIN(330,MAX(250,b.size.width-456)),36) action:@selector(showTemplatePicker) blue:YES];
   [self addNoticeCardIfNeeded];
 }
 - (NSArray *)loadChatMessages {
@@ -697,8 +742,81 @@ static void UpdateHistory(NSString *appName) {
   self.store[@"projects"][pid] = [@{@"name":name, @"updatedAt":@(NSDate.date.timeIntervalSince1970), @"activeFile":@"ContentView", @"files":[@{@"ContentView":[@{@"name":@"ContentView", @"code":@"import SwiftUI\n\nstruct ContentView: View {\n    var body: some View {\n        Text(\"Hello\")\n    }\n}\n\n#Preview {\n    ContentView()\n}\n"} mutableCopy]} mutableCopy]} mutableCopy];
   self.activeProjectID = pid; self.store[@"activeProject"] = pid; [self saveStore]; [self showMain];
 }
+- (void)showTemplatePicker {
+  self.showingChat = NO; self.showingProject = NO; self.showingTemplatePicker = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects];
+  NSRect b = self.root.bounds;
+  [self button:@"<" frame:NSMakeRect(18,b.size.height-88,54,54) action:@selector(showMain) blue:YES];
+  [self label:@"Templates" frame:NSMakeRect(92,b.size.height-92,320,68) font:TitleFont(46) color:NSColor.whiteColor];
+  [self addLine:NSMakeRect(0,b.size.height-102,b.size.width,2)];
+  NSArray *rows = @[
+    @{@"id":@"mercury", @"title":@"Mercury", @"detail":@"Image background from ~/studioimages/mercury.heic"},
+    @{@"id":@"wood", @"title":@"Wood", @"detail":@"Image background from ~/studioimages/wood.jpeg"},
+    @{@"id":@"elegant", @"title":@"Elegant", @"detail":@"Blue, purple, pink, and orange AngularGradient"},
+    @{@"id":@"cleanWebsite", @"title":@"Clean website", @"detail":@"White website background with a clean top header"},
+    @{@"id":@"navBar", @"title":@"Nav bar", @"detail":@"Gray website background with a compact nav header"}
+  ];
+  CGFloat y = b.size.height - 190;
+  for (NSDictionary *rowInfo in rows) {
+    NSView *rowBackground = [[NSView alloc] initWithFrame:NSMakeRect(18,y,b.size.width-36,78)];
+    rowBackground.wantsLayer = YES;
+    rowBackground.layer.backgroundColor = DarkRow().CGColor;
+    rowBackground.layer.cornerRadius = 16;
+    [self.dynamicViews addObject:rowBackground];
+    [self.root addSubview:rowBackground];
+    [self label:rowInfo[@"title"] frame:NSMakeRect(42,y+28,240,36) font:TitleFont(32) color:NSColor.whiteColor];
+    [self label:rowInfo[@"detail"] frame:NSMakeRect(286,y+30,b.size.width-340,28) font:MonoFont(16) color:NSColor.lightGrayColor];
+    NSButton *row = [self button:@"" frame:NSMakeRect(0,y-8,b.size.width,94) action:@selector(createTemplateProjectFromButton:) blue:NO];
+    row.identifier = rowInfo[@"id"];
+    row.layer.backgroundColor = NSColor.clearColor.CGColor;
+    row.layer.opacity = 0.01;
+    [self.root addSubview:row positioned:NSWindowAbove relativeTo:nil];
+    y -= 98;
+  }
+  [self addNoticeCardIfNeeded];
+}
+- (NSString *)templateContentViewCode {
+  return @"import SwiftUI\n\nstruct ContentView: View {\n    var body: some View {\n        TemplateView()\n    }\n}\n\n#Preview {\n    ContentView()\n}\n";
+}
+- (NSString *)templateContentViewCodeForKind:(NSString *)kind {
+  if ([kind isEqualToString:@"cleanWebsite"]) {
+    return @"import SwiftUI\n\nstruct ContentView: View {\n    var body: some View {\n        TemplateView(\n            title: \"Starry eyes\",\n            titleImage: \"star.fill\",\n            topButtons: [\n                TopButton(\"About Us\") {\n                    NestedTemplateView(\n                        title: \"About Us\",\n                        titleImage: \"star.fill\",\n                        subtitles: [Subtitle(\"We build simple, bright pages with a clean structure.\")],\n                        cards: [\n                            Card(title: \"Mission\", status: \"OPEN\") {\n                                Text(\"Write your About Us content here.\")\n                            }\n                        ],\n                        order: \"subtitle1;cards\"\n                    )\n                },\n                TopButton(\"Products\") {\n                    NestedTemplateView(\n                        title: \"Products\",\n                        titleImage: \"shippingbox.fill\",\n                        subtitles: [Subtitle(\"Showcase the things you make.\")],\n                        cards: [\n                            Card(title: \"Product\", status: \"NEW\") {\n                                Text(\"Add product details here.\")\n                            }\n                        ],\n                        order: \"subtitle1;cards\"\n                    )\n                },\n                TopButton(\"Donate\") {\n                    NestedTemplateView(\n                        title: \"Donate\",\n                        titleImage: \"heart.fill\",\n                        subtitles: [Subtitle(\"Support the work.\")],\n                        cards: [\n                            Card(title: \"Gift\", status: \"THANKS\") {\n                                Text(\"Add donation copy here.\")\n                            }\n                        ],\n                        order: \"subtitle1;cards\"\n                    )\n                }\n            ],\n            subtitles: [Subtitle(\"A clean website starter.\")],\n            cards: [Card(title: \"Welcome\", status: \"READY\")],\n            order: \"subtitle1;cards\"\n        )\n    }\n}\n\n#Preview {\n    ContentView()\n}\n";
+  }
+  if ([kind isEqualToString:@"navBar"]) {
+    return @"import SwiftUI\n\nstruct ContentView: View {\n    var body: some View {\n        TemplateView(\n            title: \"Protect Fish L.C.C\",\n            titleImage: \"fish.fill\",\n            topButtons: [\n                TopButton(\"Home\") {\n                    NestedTemplateView(\n                        title: \"Home\",\n                        titleImage: \"house.fill\",\n                        subtitles: [Subtitle(\"Welcome to the home page.\")],\n                        cards: [\n                            Card(title: \"News\", status: \"LIVE\") {\n                                Text(\"Add homepage content here.\")\n                            }\n                        ],\n                        order: \"subtitle1;cards\"\n                    )\n                },\n                TopButton(\"Our mission\") {\n                    NestedTemplateView(\n                        title: \"Our mission\",\n                        titleImage: \"leaf.fill\",\n                        subtitles: [Subtitle(\"Protecting water, habitats, and the fish that live there.\")],\n                        cards: [\n                            Card(title: \"Action\", status: \"NOW\") {\n                                Text(\"Write your mission details here.\")\n                            }\n                        ],\n                        order: \"subtitle1;cards\"\n                    )\n                }\n            ],\n            subtitles: [Subtitle(\"A compact navigation starter.\")],\n            cards: [Card(title: \"Welcome\", status: \"READY\")],\n            order: \"subtitle1;cards\"\n        )\n    }\n}\n\n#Preview {\n    ContentView()\n}\n";
+  }
+  return [self templateContentViewCode];
+}
+- (NSString *)templateViewCodeForKind:(NSString *)kind {
+  NSString *background = @"elegant";
+  if ([kind isEqualToString:@"mercury"]) background = @"mercury";
+  else if ([kind isEqualToString:@"wood"]) background = @"wood";
+  else if ([kind isEqualToString:@"cleanWebsite"]) background = @"cleanWebsite";
+  else if ([kind isEqualToString:@"navBar"]) background = @"navBar";
+  return [NSString stringWithFormat:
+@"import SwiftUI\nimport AppKit\n\nstruct TopButton: Identifiable {\n    let id = UUID()\n    let title: String\n    let content: AnyView\n\n    init<Content: View>(_ title: String, @ViewBuilder content: () -> Content) {\n        self.title = title\n        self.content = AnyView(content())\n    }\n}\n\nstruct Subtitle: Identifiable {\n    let id = UUID()\n    let text: String\n\n    init(_ text: String) {\n        self.text = text\n    }\n}\n\nstruct Card: Identifiable {\n    let id = UUID()\n    var title: String\n    var status: String?\n    let content: AnyView\n\n    init(title: String, status: String? = nil) {\n        self.title = title\n        self.status = status\n        self.content = AnyView(Text(title))\n    }\n\n    init<Content: View>(title: String, status: String? = nil, @ViewBuilder content: () -> Content) {\n        self.title = title\n        self.status = status\n        self.content = AnyView(content())\n    }\n}\n\nstruct PiChart: Identifiable {\n    let id = UUID()\n    var values: [Double]\n    var colors: [Color]\n\n    init(values: [Double] = [35, 25, 20, 20], colors: [Color] = [.blue, .purple, .pink, .orange]) {\n        self.values = values\n        self.colors = colors\n    }\n}\n\nstruct NestedTemplateView: View {\n    var title: String\n    var titleImage: String\n    var topButtons: [TopButton]\n    var subtitles: [Subtitle]\n    var cards: [Card]\n    var piCharts: [PiChart]\n    var order: String\n    var headerColor: Color?\n\n    init(\n        title: String = \"Hello\",\n        titleImage: String = \"square\",\n        topButtons: [TopButton] = [],\n        subtitles: [Subtitle] = [Subtitle(\"Something\")],\n        cards: [Card] = [Card(title: \"Something\", status: \"Something\")],\n        piCharts: [PiChart] = [PiChart()],\n        order: String = \"subtitle1;cards;piChart1\",\n        headerColor: Color? = nil\n    ) {\n        self.title = title\n        self.titleImage = titleImage\n        self.topButtons = topButtons\n        self.subtitles = subtitles\n        self.cards = cards\n        self.piCharts = piCharts\n        self.order = order\n        self.headerColor = headerColor\n    }\n\n    var body: some View {\n        TemplateView(\n            title: title,\n            titleImage: titleImage,\n            topButtons: topButtons,\n            subtitles: subtitles,\n            cards: cards,\n            piCharts: piCharts,\n            order: order,\n            backgroundStyle: \"nested\",\n            headerColor: headerColor\n        )\n    }\n}\n\nstruct TemplateView: View {\n    var title: String\n    var titleImage: String\n    var topButtons: [TopButton]\n    var subtitles: [Subtitle]\n    var cards: [Card]\n    var piCharts: [PiChart]\n    var order: String\n    var backgroundStyle: String\n    var headerColor: Color?\n    @State private var selectedTopButton = 0\n    @State private var openedCardID: UUID?\n\n    init(\n        title: String = \"Hello\",\n        titleImage: String = \"square\",\n        topButtons: [TopButton] = [],\n        subtitles: [Subtitle] = [Subtitle(\"Something\")],\n        cards: [Card] = [Card(title: \"Something\", status: \"Something\")],\n        piCharts: [PiChart] = [PiChart()],\n        order: String = \"subtitle1;cards;piChart1\",\n        backgroundStyle: String = \"%@\",\n        headerColor: Color? = nil\n    ) {\n        self.title = title\n        self.titleImage = titleImage\n        self.topButtons = topButtons\n        self.subtitles = subtitles\n        self.cards = cards\n        self.piCharts = piCharts\n        self.order = order\n        self.backgroundStyle = backgroundStyle\n        self.headerColor = headerColor\n    }\n\n    var isCleanWebsite: Bool { backgroundStyle == \"cleanWebsite\" }\n    var isNavBar: Bool { backgroundStyle == \"navBar\" }\n    var isLightStyle: Bool { isCleanWebsite || isNavBar }\n    var templateTextColor: Color { isLightStyle ? .black : .white }\n\n    var body: some View {\n        ZStack(alignment: .topLeading) {\n            TemplateBackground(style: backgroundStyle)\n            ScrollView {\n                VStack(alignment: .leading, spacing: 24) {\n                    header\n                    pageContent\n                        .padding(isNavBar ? EdgeInsets(top: 0, leading: 22, bottom: 0, trailing: 22) : EdgeInsets())\n                }\n                .padding(isNavBar ? EdgeInsets(top: 0, leading: 0, bottom: 22, trailing: 0) : EdgeInsets(top: 22, leading: 22, bottom: 22, trailing: 22))\n                .frame(maxWidth: .infinity, alignment: .leading)\n            }\n        }\n        .frame(maxWidth: .infinity, maxHeight: .infinity)\n        .clipped()\n    }\n\n    @ViewBuilder var header: some View {\n        if isCleanWebsite {\n            cleanWebsiteHeader\n        } else if isNavBar {\n            navBarHeader\n        } else {\n            overlayHeader\n        }\n    }\n\n    var overlayHeader: some View {\n        HStack(alignment: .center, spacing: 14) {\n            Image(systemName: titleImage)\n                .foregroundStyle(.white)\n                .font(.system(size: 42, weight: .semibold))\n                .frame(width: 50, height: 50)\n            Text(title)\n                .foregroundStyle(.white)\n                .font(.system(size: 40, weight: .bold, design: .rounded))\n                .lineLimit(1)\n                .minimumScaleFactor(0.55)\n            ForEach(topButtons.indices, id: \\.self) { index in\n                headerButton(index: index, textColor: .white, selectedTextColor: .black, underlineColor: .clear, usesPill: true, usesUnderline: false)\n            }\n        }\n    }\n\n    var cleanWebsiteHeader: some View {\n        VStack(spacing: 10) {\n            HStack(alignment: .center, spacing: 14) {\n                Image(systemName: titleImage)\n                    .foregroundStyle(.black)\n                    .font(.system(size: 46, weight: .bold))\n                    .frame(width: 54, height: 54)\n                Text(title)\n                    .foregroundStyle(.black)\n                    .font(.system(size: 32, weight: .regular, design: .rounded))\n                    .lineLimit(1)\n                    .minimumScaleFactor(0.55)\n                Spacer(minLength: 20)\n                ForEach(topButtons.indices, id: \\.self) { index in\n                    headerButton(index: index, textColor: .black, selectedTextColor: .black, underlineColor: .blue, usesPill: false, usesUnderline: true)\n                }\n            }\n            Rectangle()\n                .fill(Color.blue)\n                .frame(height: 3)\n        }\n        .padding(.horizontal, 16)\n        .padding(.vertical, 12)\n        .background(headerColor ?? Color.white)\n        .frame(maxWidth: .infinity, alignment: .leading)\n    }\n\n    var navBarHeader: some View {\n        HStack(alignment: .center, spacing: 16) {\n            Image(systemName: titleImage)\n                .foregroundStyle(.black)\n                .font(.system(size: 34, weight: .semibold))\n                .frame(width: 42, height: 42)\n            Text(title)\n                .foregroundStyle(.black)\n                .font(.system(size: 32, weight: .regular, design: .rounded))\n                .lineLimit(1)\n                .minimumScaleFactor(0.55)\n            ForEach(topButtons.indices, id: \\.self) { index in\n                headerButton(index: index, textColor: .red, selectedTextColor: .red, underlineColor: .red, usesPill: false, usesUnderline: true)\n            }\n            Spacer(minLength: 0)\n        }\n        .padding(.horizontal, 18)\n        .padding(.vertical, 13)\n        .background(headerColor ?? Color.green)\n        .frame(maxWidth: .infinity, alignment: .leading)\n    }\n\n    func headerButton(index: Int, textColor: Color, selectedTextColor: Color, underlineColor: Color, usesPill: Bool, usesUnderline: Bool) -> some View {\n        Button(topButtons[index].title) {\n            selectedTopButton = index\n            openedCardID = nil\n        }\n        .font(.system(size: usesPill ? 21 : 28, weight: .regular, design: .rounded))\n        .foregroundStyle(selectedTopButton == index ? selectedTextColor : textColor)\n        .padding(.horizontal, usesPill && selectedTopButton == index ? 18 : 8)\n        .padding(.vertical, usesPill && selectedTopButton == index ? 9 : 5)\n        .background(usesPill && selectedTopButton == index ? Color.white : Color.clear)\n        .clipShape(Capsule())\n        .overlay(alignment: .bottom) {\n            if usesUnderline {\n                Rectangle()\n                    .fill(underlineColor)\n                    .frame(height: selectedTopButton == index ? 3 : 2)\n                    .padding(.horizontal, 6)\n            }\n        }\n        .contentShape(Rectangle())\n        .buttonStyle(.plain)\n    }\n\n    @ViewBuilder var pageContent: some View {\n        if let id = openedCardID, let card = cards.first(where: { $0.id == id }) {\n            cardDetailPage(card)\n        } else if topButtons.indices.contains(selectedTopButton) {\n            topButtons[selectedTopButton].content\n                .foregroundStyle(templateTextColor)\n                .frame(maxWidth: .infinity, alignment: .leading)\n        } else {\n            defaultContent\n        }\n    }\n\n    var defaultContent: some View {\n        VStack(alignment: .leading, spacing: 24) {\n            orderedContent\n        }\n    }\n\n    func cardDetailPage(_ card: Card) -> some View {\n        VStack(alignment: .leading, spacing: 18) {\n            Button {\n                openedCardID = nil\n            } label: {\n                Text(\"<\")\n                    .font(.system(size: 26, weight: .bold, design: .rounded))\n                    .frame(width: 42, height: 42)\n                    .background(Color.blue)\n                    .clipShape(Circle())\n            }\n            .buttonStyle(.plain)\n\n            VStack(alignment: .leading, spacing: 14) {\n                Text(card.title)\n                    .foregroundStyle(templateTextColor)\n                    .font(.system(size: 32, weight: .bold, design: .rounded))\n                card.content\n                    .foregroundStyle(templateTextColor)\n                    .font(.system(size: 21, weight: .semibold, design: .rounded))\n                    .frame(maxWidth: .infinity, alignment: .leading)\n            }\n            .padding(22)\n            .frame(maxWidth: 680, alignment: .leading)\n            .background(Color.gray.opacity(0.72))\n            .clipShape(RoundedRectangle(cornerRadius: 18))\n        }\n    }\n\n    var orderedContent: some View {\n        VStack(alignment: .leading, spacing: 24) {\n            ForEach(orderTokens, id: \\.self) { token in\n                section(for: token)\n            }\n        }\n    }\n\n    var orderTokens: [String] {\n        order.split(separator: \";\").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }\n    }\n\n    @ViewBuilder func section(for token: String) -> some View {\n        if token.hasPrefix(\"subtitle\"), let index = numericSuffix(token), subtitles.indices.contains(index - 1) {\n            Text(subtitles[index - 1].text)\n                .foregroundStyle(templateTextColor)\n                .font(.system(size: 26, weight: .bold, design: .rounded))\n        } else if token == \"cards\" {\n            LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 16)], alignment: .leading, spacing: 16) {\n                ForEach(cards) { card in\n                    Button {\n                        openedCardID = card.id\n                    } label: {\n                        TemplateCardView(card: card, textColor: templateTextColor)\n                    }\n                    .buttonStyle(.plain)\n                    .contentShape(RoundedRectangle(cornerRadius: 18))\n                }\n            }\n            .frame(maxWidth: 680, alignment: .leading)\n        } else if token.hasPrefix(\"piChart\"), let index = numericSuffix(token), piCharts.indices.contains(index - 1) {\n            PiChartView(chart: piCharts[index - 1])\n                .frame(width: 160, height: 160)\n        }\n    }\n\n    func numericSuffix(_ token: String) -> Int? {\n        let digits = token.reversed().prefix { $0.isNumber }.reversed()\n        return Int(String(digits))\n    }\n}\n\nstruct TemplateCardView: View {\n    var card: Card\n    var textColor: Color = .white\n\n    var body: some View {\n        VStack(alignment: .leading) {\n            Text(card.title)\n                .foregroundStyle(textColor)\n                .font(.system(size: 28, weight: .regular, design: .rounded))\n                .lineLimit(2)\n                .minimumScaleFactor(0.75)\n                .frame(maxWidth: .infinity, alignment: .leading)\n            Spacer()\n            if let status = card.status, !status.isEmpty {\n                Text(status)\n                    .font(.system(size: 15, weight: .bold, design: .monospaced))\n                    .lineLimit(1)\n                    .minimumScaleFactor(0.7)\n                    .padding(.horizontal, 12)\n                    .padding(.vertical, 7)\n                    .frame(maxWidth: .infinity)\n                    .background(Color(red: 0.78, green: 0.24, blue: 0.14))\n                    .overlay(Capsule().stroke(Color.orange, lineWidth: 2))\n                    .clipShape(Capsule())\n            }\n        }\n        .padding(16)\n        .frame(width: 190, height: 210)\n        .background(Color.gray.opacity(0.82))\n        .clipShape(RoundedRectangle(cornerRadius: 18))\n    }\n}\n\nstruct PiChartView: View {\n    var chart: PiChart\n\n    var total: Double { max(chart.values.reduce(0, +), 0.001) }\n\n    var body: some View {\n        ZStack {\n            if chart.colors.isEmpty {\n                Circle().fill(Color.gray.opacity(0.8))\n            } else {\n                ForEach(chart.values.indices, id: \\.self) { index in\n                    PieSlice(startAngle: startAngle(for: index), endAngle: endAngle(for: index))\n                        .fill(chart.colors[index %% chart.colors.count])\n                }\n            }\n        }\n        .clipShape(Circle())\n    }\n\n    func startAngle(for index: Int) -> Angle {\n        Angle(degrees: chart.values.prefix(index).reduce(0, +) / total * 360 - 90)\n    }\n\n    func endAngle(for index: Int) -> Angle {\n        Angle(degrees: chart.values.prefix(index + 1).reduce(0, +) / total * 360 - 90)\n    }\n}\n\nstruct PieSlice: Shape {\n    var startAngle: Angle\n    var endAngle: Angle\n\n    func path(in rect: CGRect) -> Path {\n        var path = Path()\n        let center = CGPoint(x: rect.midX, y: rect.midY)\n        path.move(to: center)\n        path.addArc(center: center, radius: min(rect.width, rect.height) / 2, startAngle: startAngle, endAngle: endAngle, clockwise: false)\n        path.closeSubpath()\n        return path\n    }\n}\n\nstruct TemplateBackground: View {\n    var style: String\n\n    var body: some View {\n        GeometryReader { geometry in\n            Group {\n                if style == \"nested\" {\n                    Color.clear\n                } else if style == \"cleanWebsite\" {\n                    Color.white\n                        .frame(width: geometry.size.width, height: geometry.size.height)\n                } else if style == \"navBar\" {\n                    Color.gray.opacity(0.28)\n                        .frame(width: geometry.size.width, height: geometry.size.height)\n                } else if style == \"mercury\" {\n                    imageBackground(path: \"~/studioimages/mercury.heic\", size: geometry.size)\n                } else if style == \"wood\" {\n                    imageBackground(path: \"~/studioimages/wood.jpeg\", size: geometry.size)\n                } else {\n                    AngularGradient(colors: [.blue, .purple, .pink, .orange], center: .center)\n                        .frame(width: geometry.size.width, height: geometry.size.height)\n                }\n            }\n            .frame(width: geometry.size.width, height: geometry.size.height)\n            .clipped()\n        }\n        .clipped()\n    }\n\n    @ViewBuilder func imageBackground(path: String, size: CGSize) -> some View {\n        let expanded = NSString(string: path).expandingTildeInPath\n        if let image = NSImage(contentsOfFile: expanded) {\n            Image(nsImage: image)\n                .resizable()\n                .scaledToFill()\n                .frame(width: size.width, height: size.height)\n                .clipped()\n                .overlay(Color.black.opacity(0.35))\n        } else {\n            Color.black\n                .frame(width: size.width, height: size.height)\n        }\n    }\n}\n\n", background];
+}
+- (void)createTemplateProjectFromButton:(NSButton *)sender {
+  NSString *kind = sender.identifier ?: @"elegant";
+  NSString *displayKind = kind.capitalizedString;
+  if ([kind isEqualToString:@"cleanWebsite"]) displayKind = @"Clean Website";
+  else if ([kind isEqualToString:@"navBar"]) displayKind = @"Nav Bar";
+  NSString *baseName = [NSString stringWithFormat:@"%@ Template", displayKind.length ? displayKind : @"Elegant"];
+  NSString *name = [self uniqueProjectName:baseName];
+  NSString *pid = [self projectIDForNewProjectName:name];
+  NSMutableDictionary *files = [@{
+    @"ContentView": [@{@"name":@"ContentView", @"code":[self templateContentViewCodeForKind:kind]} mutableCopy],
+    @"TemplateView": [@{@"name":@"TemplateView", @"code":[self templateViewCodeForKind:kind]} mutableCopy]
+  } mutableCopy];
+  self.store[@"projects"][pid] = [@{@"name":name, @"updatedAt":@(NSDate.date.timeIntervalSince1970), @"activeFile":@"ContentView", @"files":files} mutableCopy];
+  self.activeProjectID = pid;
+  self.activeFileID = @"ContentView";
+  self.store[@"activeProject"] = pid;
+  self.showingTemplatePicker = NO;
+  [self saveStore];
+  [self showProject];
+}
 - (void)showProject {
-  self.showingChat = NO; self.showingProject = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; self.floatingPreviewControls = [NSMutableArray array]; NSDictionary *p = [self project]; if (!self.activeFileID) self.activeFileID = p[@"activeFile"] ?: self.fileIDs.firstObject;
+  self.showingChat = NO; self.showingTemplatePicker = NO; self.showingProject = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; self.floatingPreviewControls = [NSMutableArray array]; NSDictionary *p = [self project]; if (!self.activeFileID) self.activeFileID = p[@"activeFile"] ?: self.fileIDs.firstObject;
   NSRect b = self.root.bounds;
   CGFloat leftW = 244, headerY = MAX(674, b.size.height - 91), contentTop = headerY - 19, consoleH = self.fishyPanelMode ? 332 : 126;
   BOOL previewVisible = [self previewPaneVisible];
@@ -721,6 +839,7 @@ static void UpdateHistory(NSString *appName) {
     self.previewPaneFrame = NSZeroRect;
   }
   CGFloat editorH = MAX(220, contentTop - editorY);
+  CGFloat bottomButtonY = self.fishyPanelMode ? consoleH + 18 : 18;
   [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,145,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(402,headerY+16,130,44) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(544,headerY+16,100,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(656,headerY+16,120,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(788,headerY+16,150,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,self.fishyPanelMode ? consoleH : 0,2,headerY - (self.fishyPanelMode ? consoleH : 0))];
   if (previewVisible) {
     CGFloat dividerX = self.previewPaneFrame.origin.x - 9 - sideBarW;
@@ -749,8 +868,47 @@ static void UpdateHistory(NSString *appName) {
       [self.previewContainerView addSubview:waiting];
     }
   } else { self.previewContainerView = nil; }
-  CGFloat y = contentTop - 30; for (NSString *fid in self.fileIDs) { NSDictionary *f = [self project][@"files"][fid]; if (self.swiftLogo) { NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,y-1,32,28)]; iv.image = self.swiftLogo; [self.dynamicViews addObject:iv]; [self.root addSubview:iv]; } [self label:f[@"name"] frame:NSMakeRect(54,y,175,27) font:MonoFont(21) color:NSColor.whiteColor]; NSButton *hit = [self button:@"" frame:NSMakeRect(0,y-4,240,34) action:@selector(selectFile:) blue:NO]; hit.identifier = fid; hit.layer.backgroundColor = ([fid isEqualToString:self.activeFileID] ? Blue() : NSColor.clearColor).CGColor; hit.layer.opacity = [fid isEqualToString:self.activeFileID] ? 0.35 : 0.0; y -= 36; }
-  CGFloat bottomButtonY = self.fishyPanelMode ? consoleH + 18 : 18;
+  CGFloat fileListBottom = bottomButtonY + 46;
+  CGFloat fileListH = MAX(80, contentTop - fileListBottom - 10);
+  NSScrollView *fileScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0,fileListBottom,leftW,fileListH)];
+  fileScroll.borderType = NSNoBorder;
+  fileScroll.hasVerticalScroller = YES;
+  fileScroll.drawsBackground = NO;
+  [self tuneScrollView:fileScroll];
+  CGFloat fileContentH = MAX(fileListH, self.fileIDs.count * 38 + 10);
+  NSView *fileContent = [[NSView alloc] initWithFrame:NSMakeRect(0,0,leftW,fileContentH)];
+  CGFloat fileY = fileContentH - 36;
+  for (NSString *fid in self.fileIDs) {
+    NSDictionary *f = [self project][@"files"][fid];
+    BOOL selectedFile = [fid isEqualToString:self.activeFileID];
+    NSButton *hit = [[NSButton alloc] initWithFrame:NSMakeRect(0,fileY-4,leftW-4,34)];
+    hit.title = @"";
+    hit.bordered = NO;
+    hit.target = self;
+    hit.action = @selector(selectFile:);
+    hit.identifier = fid;
+    hit.wantsLayer = YES;
+    hit.layer.backgroundColor = (selectedFile ? Blue() : NSColor.clearColor).CGColor;
+    hit.layer.opacity = selectedFile ? 0.35 : 0.01;
+    hit.layer.cornerRadius = 12;
+    [fileContent addSubview:hit];
+    if (self.swiftLogo) {
+      NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,fileY-1,32,28)];
+      iv.image = self.swiftLogo;
+      [fileContent addSubview:iv];
+    }
+    NSTextField *fileName = [[NSTextField alloc] initWithFrame:NSMakeRect(54,fileY,175,27)];
+    fileName.stringValue = f[@"name"] ?: fid;
+    fileName.font = MonoFont(21);
+    fileName.textColor = NSColor.whiteColor;
+    fileName.bezeled = NO; fileName.drawsBackground = NO; fileName.editable = NO; fileName.selectable = NO;
+    [fileContent addSubview:fileName];
+    fileY -= 38;
+  }
+  fileScroll.documentView = fileContent;
+  [self.dynamicViews addObject:fileScroll];
+  [self.root addSubview:fileScroll];
+  if (fileContentH > fileListH) [[fileScroll contentView] scrollToPoint:NSMakePoint(0, fileContentH - fileListH)];
   [self button:@"+" frame:NSMakeRect(18,bottomButtonY,32,32) action:@selector(newFile:) blue:YES]; [self button:(previewVisible ? @"<" : @">") frame:NSMakeRect(58,bottomButtonY,32,32) action:@selector(togglePreviewPane:) blue:YES];
   if (!self.previewPaneWide) {
     NSScrollView *editScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(editorX,editorY,editorW,editorH)]; editScroll.borderType = NSNoBorder; [self tuneScrollView:editScroll]; editScroll.wantsLayer = YES; editScroll.layer.backgroundColor = NSColor.blackColor.CGColor;
