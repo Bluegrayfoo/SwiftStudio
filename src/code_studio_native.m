@@ -749,8 +749,8 @@ static void UpdateHistory(NSString *appName) {
   [self label:@"Templates" frame:NSMakeRect(92,b.size.height-92,320,68) font:TitleFont(46) color:NSColor.whiteColor];
   [self addLine:NSMakeRect(0,b.size.height-102,b.size.width,2)];
   NSArray *rows = @[
-    @{@"id":@"mercury", @"title":@"Mercury", @"detail":@"Image background from ~/studioimages/mercury.heic"},
-    @{@"id":@"wood", @"title":@"Wood", @"detail":@"Image background from ~/studioimages/wood.jpeg"},
+    @{@"id":@"mercury", @"title":@"Mercury", @"detail":@"Runner packages ~/studioimages/mercury.heic into the preview"},
+    @{@"id":@"wood", @"title":@"Wood", @"detail":@"Runner packages ~/studioimages/wood.jpeg into the preview"},
     @{@"id":@"elegant", @"title":@"Elegant", @"detail":@"Blue, purple, pink, and orange AngularGradient"},
     @{@"id":@"cleanWebsite", @"title":@"Clean website", @"detail":@"White website background with a clean top header"},
     @{@"id":@"navBar", @"title":@"Nav bar", @"detail":@"Gray website background with a compact nav header"}

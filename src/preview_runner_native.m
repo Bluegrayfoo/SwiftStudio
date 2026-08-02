@@ -178,6 +178,40 @@ static NSString *StripPreviewBlocks(NSString *source) {
   return out;
 }
 
+static NSString *SwiftStringLiteral(NSString *text) {
+  NSMutableString *out = [text mutableCopy] ?: [NSMutableString string];
+  [out replaceOccurrencesOfString:@"\\" withString:@"\\\\" options:0 range:NSMakeRange(0, out.length)];
+  [out replaceOccurrencesOfString:@"\"" withString:@"\\\"" options:0 range:NSMakeRange(0, out.length)];
+  [out replaceOccurrencesOfString:@"\n" withString:@"\\n" options:0 range:NSMakeRange(0, out.length)];
+  return out;
+}
+
+static NSString *RunnerTemplateImageSupport(void) {
+  NSDictionary<NSString *, NSString *> *paths = @{
+    @"mercury": [@"~/studioimages/mercury.heic" stringByExpandingTildeInPath],
+    @"wood": [@"~/studioimages/wood.jpeg" stringByExpandingTildeInPath]
+  };
+  NSMutableArray<NSString *> *entries = [NSMutableArray array];
+  for (NSString *key in paths) {
+    NSData *data = [NSData dataWithContentsOfFile:paths[key]];
+    if (!data.length) continue;
+    NSString *encoded = [data base64EncodedStringWithOptions:0];
+    [entries addObject:[NSString stringWithFormat:@"    \"%@\": \"%@\"", SwiftStringLiteral(key), SwiftStringLiteral(encoded)]];
+  }
+  NSString *joined = [entries componentsJoinedByString:@",\n"];
+  return [NSString stringWithFormat:
+@"\nlet SwiftStudioRunnerImageData: [String: String] = [\n%@\n]\n\nfunc SwiftStudioRunnerImage(named requestedName: String, fallbackPath: String) -> NSImage? {\n    let lower = (requestedName + \" \" + fallbackPath).lowercased()\n    let key: String\n    if lower.contains(\"mercury\") {\n        key = \"mercury\"\n    } else if lower.contains(\"wood\") {\n        key = \"wood\"\n    } else {\n        key = \"\"\n    }\n    guard let encoded = SwiftStudioRunnerImageData[key], let data = Data(base64Encoded: encoded) else { return nil }\n    return NSImage(data: data)\n}\n", joined];
+}
+
+static NSString *PrepareHostedSource(NSString *source) {
+  NSMutableString *hostedSource = [StripPreviewBlocks(source) mutableCopy];
+  [hostedSource replaceOccurrencesOfString:@"if let image = NSImage(contentsOfFile: expanded) {"
+                                withString:@"if let image = SwiftStudioRunnerImage(named: path, fallbackPath: expanded) {"
+                                   options:0
+                                     range:NSMakeRange(0, hostedSource.length)];
+  return hostedSource;
+}
+
 static NSDictionary *RunBuildTask(NSArray<NSString *> *arguments, NSString *cache, NSTimeInterval timeout, double progressStart, double progressEnd) {
   NSTask *task = [NSTask new];
   task.launchPath = arguments.firstObject;
@@ -223,7 +257,7 @@ static NSDictionary *CompileExecutable(NSString *source, NSString *requestID, NS
   NSString *cache = [cacheRoot stringByAppendingPathComponent:previewArch];
   [[NSFileManager defaultManager] createDirectoryAtPath:cache withIntermediateDirectories:YES attributes:nil error:nil];
   SetPercent(@"Compile", 10);
-  NSString *hosted = [NSString stringWithFormat:@"import SwiftUI\nimport AppKit\n%@\n\n@_cdecl(\"SwiftStudioCreatePreviewView\")\npublic func SwiftStudioCreatePreviewView() -> UnsafeMutableRawPointer {\n    let view = NSHostingView(rootView: ContentView())\n    view.wantsLayer = true\n    view.layer?.backgroundColor = NSColor.black.cgColor\n    return Unmanaged.passRetained(view).toOpaque()\n}\n", StripPreviewBlocks(source)];
+  NSString *hosted = [NSString stringWithFormat:@"import SwiftUI\nimport AppKit\n%@\n%@\n\n@_cdecl(\"SwiftStudioCreatePreviewView\")\npublic func SwiftStudioCreatePreviewView() -> UnsafeMutableRawPointer {\n    let view = NSHostingView(rootView: ContentView())\n    view.wantsLayer = true\n    view.layer?.backgroundColor = NSColor.black.cgColor\n    return Unmanaged.passRetained(view).toOpaque()\n}\n", RunnerTemplateImageSupport(), PrepareHostedSource(source)];
   [hosted writeToFile:sourcePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
   SetPercent(@"Compile", 22);
   NSMutableArray<NSString *> *archs = [NSMutableArray array];

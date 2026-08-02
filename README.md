@@ -93,8 +93,8 @@ The preview runner uses that helper for `fish suggest` parser diagnostics. If th
 
 On the main projects page, click `Add project from template` to create a starter project. The template picker currently includes:
 
-- `Mercury`: uses `~/studioimages/mercury.heic` as the preview background.
-- `Wood`: uses `~/studioimages/wood.jpeg` as the preview background.
+- `Mercury`: the preview runner packages `~/studioimages/mercury.heic` into the compiled preview.
+- `Wood`: the preview runner packages `~/studioimages/wood.jpeg` into the compiled preview.
 - `Elegant`: uses a blue, purple, pink, and orange SwiftUI `AngularGradient`.
 - `Clean website`: uses a white page background with a clean website header.
 - `Nav bar`: uses a gray page background with a full-width top navigation bar.
@@ -217,7 +217,7 @@ TemplateView(
 )
 ```
 
-Mercury and Wood image templates load their image files at preview runtime. If the image is missing, the template falls back to a dark background.
+Mercury and Wood image templates are packaged by the preview runner at compile time. The studio receives the compiled preview with the image data already inside it, so the studio does not need `~/studioimages`. If the image is missing on the runner, the template falls back to a dark background.
 
 Install without automatically opening the window:
 
