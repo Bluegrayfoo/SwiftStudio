@@ -131,17 +131,154 @@ static void UpdateHistory(NSString *appName) {
   hist[stamp] = @{@"text":[NSString stringWithFormat:@"%@ was run at %@ on %@", appName, [tf stringFromDate:now], [df stringFromDate:now]], @"timestamp":stamp}; PatchDocument(@"LatestHistory/History", @{@"hist":hist}, nil);
 }
 
+
+@interface SwiftStudioDesktopBackgroundView : NSView
+@end
+@implementation SwiftStudioDesktopBackgroundView
+- (void)drawRect:(NSRect)dirtyRect {
+  NSRect b = self.bounds;
+  NSGradient *sky = [[NSGradient alloc] initWithColors:@[
+    [NSColor colorWithCalibratedRed:0.10 green:0.05 blue:0.22 alpha:1.0],
+    [NSColor colorWithCalibratedRed:0.92 green:0.28 blue:0.26 alpha:1.0],
+    [NSColor colorWithCalibratedRed:1.00 green:0.62 blue:0.22 alpha:1.0],
+    [NSColor colorWithCalibratedRed:0.16 green:0.19 blue:0.45 alpha:1.0]
+  ]];
+  [sky drawInRect:b angle:270];
+  NSColor *glowA = [NSColor colorWithCalibratedRed:1.0 green:0.88 blue:0.28 alpha:0.36];
+  NSColor *glowB = [NSColor colorWithCalibratedRed:0.25 green:0.74 blue:1.0 alpha:0.32];
+  NSColor *glowC = [NSColor colorWithCalibratedRed:0.96 green:0.18 blue:0.85 alpha:0.28];
+  NSArray *colors = @[glowA, glowB, glowC, glowA, glowB];
+  CGFloat baseY = b.size.height * 0.20;
+  CGFloat centerX = b.size.width * 0.50;
+  for (NSInteger pass = 0; pass < 5; pass++) {
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    CGFloat spread = 34 + pass * 18;
+    [path moveToPoint:NSMakePoint(centerX - 250 - pass * 15, baseY + 55 + pass * 18)];
+    [path curveToPoint:NSMakePoint(centerX - 40, baseY + 220 + pass * 10) controlPoint1:NSMakePoint(centerX - 420, baseY + 310) controlPoint2:NSMakePoint(centerX - 55, baseY + 350)];
+    [path curveToPoint:NSMakePoint(centerX - 250, baseY + 390 + pass * 18) controlPoint1:NSMakePoint(centerX - 20, baseY + 100) controlPoint2:NSMakePoint(centerX - 430, baseY + 160)];
+    [path moveToPoint:NSMakePoint(centerX + 250 + pass * 15, baseY + 55 + pass * 18)];
+    [path curveToPoint:NSMakePoint(centerX + 40, baseY + 220 + pass * 10) controlPoint1:NSMakePoint(centerX + 420, baseY + 310) controlPoint2:NSMakePoint(centerX + 55, baseY + 350)];
+    [path curveToPoint:NSMakePoint(centerX + 250, baseY + 390 + pass * 18) controlPoint1:NSMakePoint(centerX + 20, baseY + 100) controlPoint2:NSMakePoint(centerX + 430, baseY + 160)];
+    path.lineWidth = spread;
+    [[colors objectAtIndex:pass] setStroke];
+    [path stroke];
+  }
+  [[NSColor colorWithCalibratedWhite:0 alpha:0.18] setFill];
+  NSRectFillUsingOperation(b, NSCompositingOperationSourceOver);
+}
+@end
+
+
+@interface SwiftStudioDesktopIconView : NSView
+@property NSString *identifier;
+@property NSString *displayName;
+@property NSImage *icon;
+@property BOOL selected;
+@property BOOL folder;
+@property id target;
+@property SEL action;
+@property SEL doubleAction;
+@property SEL dragAction;
+@property NSPoint mouseDownWindowPoint;
+@property NSPoint startOrigin;
+@property BOOL didDrag;
+@end
+@implementation SwiftStudioDesktopIconView
+- (BOOL)isFlipped { return NO; }
+- (void)mouseDown:(NSEvent *)event {
+  self.mouseDownWindowPoint = event.locationInWindow;
+  self.startOrigin = self.frame.origin;
+  self.didDrag = NO;
+}
+- (void)mouseDragged:(NSEvent *)event {
+  NSPoint p = event.locationInWindow;
+  CGFloat dx = p.x - self.mouseDownWindowPoint.x;
+  CGFloat dy = p.y - self.mouseDownWindowPoint.y;
+  if (fabs(dx) > 3 || fabs(dy) > 3) self.didDrag = YES;
+  if (self.didDrag) {
+    NSRect f = self.frame;
+    f.origin.x = MAX(8, self.startOrigin.x + dx);
+    f.origin.y = MAX(8, self.startOrigin.y + dy);
+    self.frame = f;
+  }
+}
+- (void)mouseUp:(NSEvent *)event {
+  if (self.didDrag) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    if (self.target && self.dragAction && [self.target respondsToSelector:self.dragAction]) [self.target performSelector:self.dragAction withObject:self];
+#pragma clang diagnostic pop
+    return;
+  }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+  if (event.clickCount >= 2 && self.target && self.doubleAction && [self.target respondsToSelector:self.doubleAction]) {
+    [self.target performSelector:self.doubleAction withObject:self];
+    return;
+  }
+  if (self.target && self.action && [self.target respondsToSelector:self.action]) [self.target performSelector:self.action withObject:self];
+#pragma clang diagnostic pop
+}
+- (void)drawFolderInRect:(NSRect)rect {
+  NSBezierPath *tab = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(rect.origin.x + 8, rect.origin.y + rect.size.height - 29, rect.size.width * 0.42, 22) xRadius:5 yRadius:5];
+  [[NSColor colorWithCalibratedRed:0.22 green:0.52 blue:0.96 alpha:1.0] setFill];
+  [tab fill];
+  NSBezierPath *body = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(rect.origin.x + 5, rect.origin.y + 8, rect.size.width - 10, rect.size.height - 26) xRadius:10 yRadius:10];
+  [[NSColor colorWithCalibratedRed:0.08 green:0.40 blue:0.94 alpha:1.0] setFill];
+  [body fill];
+}
+- (void)drawRect:(NSRect)dirtyRect {
+  NSRect b = self.bounds;
+  NSRect iconRect = NSMakeRect((b.size.width - 84) / 2, b.size.height - 96, 84, 84);
+  if (self.selected) {
+    NSRect sel = NSInsetRect(iconRect, -7, -7);
+    NSBezierPath *box = [NSBezierPath bezierPathWithRoundedRect:sel xRadius:2 yRadius:2];
+    [[NSColor colorWithCalibratedWhite:0.94 alpha:0.74] setFill];
+    [box fill];
+    [[NSColor colorWithCalibratedWhite:0.14 alpha:0.9] setStroke];
+    box.lineWidth = 2;
+    [box stroke];
+  }
+  if (self.folder) [self drawFolderInRect:iconRect];
+  else if (self.icon) [self.icon drawInRect:iconRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0 respectFlipped:YES hints:@{NSImageHintInterpolation: @(NSImageInterpolationHigh)}];
+
+  NSString *text = self.displayName ?: @"";
+  NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
+  style.alignment = NSTextAlignmentCenter;
+  style.lineBreakMode = NSLineBreakByWordWrapping;
+  NSDictionary *attrs = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightBold], NSForegroundColorAttributeName: NSColor.whiteColor, NSParagraphStyleAttributeName: style};
+  NSRect maxRect = NSMakeRect(6, 7, b.size.width - 12, 42);
+  NSRect used = [text boundingRectWithSize:maxRect.size options:NSStringDrawingUsesLineFragmentOrigin attributes:attrs];
+  CGFloat labelW = MIN(maxRect.size.width, MAX(42, ceil(used.size.width) + 12));
+  CGFloat labelH = MIN(42, MAX(20, ceil(used.size.height) + 5));
+  NSRect labelRect = NSMakeRect((b.size.width - labelW) / 2, maxRect.origin.y + (42 - labelH) / 2, labelW, labelH);
+  if (self.selected) {
+    NSBezierPath *pill = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(labelRect, -3, -1) xRadius:5 yRadius:5];
+    [Blue() setFill];
+    [pill fill];
+  }
+  NSShadow *shadow = [NSShadow new];
+  shadow.shadowBlurRadius = 2;
+  shadow.shadowOffset = NSMakeSize(0, -1);
+  shadow.shadowColor = [NSColor colorWithCalibratedWhite:0 alpha:0.65];
+  [shadow set];
+  [text drawInRect:labelRect withAttributes:attrs];
+}
+@end
+
 @interface StudioDelegate : NSObject <NSApplicationDelegate, NSTextViewDelegate, NSWindowDelegate>
 @property NSWindow *window;
 @property NSView *root;
 @property NSMutableDictionary *store;
 @property NSString *activeProjectID;
 @property NSString *activeFileID;
+@property NSString *selectedDesktopID;
+@property NSString *openFolderID;
 @property NSString *pendingRequestID;
 @property NSString *initialThread;
 @property NSMutableArray<NSView *> *dynamicViews;
 @property NSMutableDictionary<NSString *, NSTextField *> *ageLabels;
-@property NSMutableDictionary<NSString *, NSButton *> *projectRows;
+@property NSMutableDictionary<NSString *, NSView *> *projectRows;
 @property NSTextView *editor;
 @property NSTextView *console;
 @property NSMutableString *consoleLog;
@@ -151,6 +288,7 @@ static void UpdateHistory(NSString *appName) {
 @property BOOL compileOnlyRequest;
 @property BOOL terminalJobPending;
 @property NSImage *swiftLogo;
+@property NSImage *nsspIcon;
 @property BOOL showingProject;
 @property BOOL openingPreview;
 @property double lastSendPercent;
@@ -190,7 +328,7 @@ static void UpdateHistory(NSString *appName) {
 @implementation StudioDelegate
 - (NSString *)docsPath { return [@"~/cmds/swift_studio_projects.json" stringByExpandingTildeInPath]; }
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
-  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; self.dynamicViews = [NSMutableArray array]; self.ageLabels = [NSMutableDictionary dictionary]; self.projectRows = [NSMutableDictionary dictionary]; self.consoleLog = [NSMutableString string]; self.previewPaneCollapsed = YES; self.swiftLogo = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/swiftlogo.png" stringByExpandingTildeInPath]];
+  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; self.dynamicViews = [NSMutableArray array]; self.ageLabels = [NSMutableDictionary dictionary]; self.projectRows = [NSMutableDictionary dictionary]; self.consoleLog = [NSMutableString string]; self.previewPaneCollapsed = YES; self.swiftLogo = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/swiftlogo.png" stringByExpandingTildeInPath]]; self.nsspIcon = [[NSImage alloc] initWithContentsOfFile:[@"~/cmds/ss_logo.png" stringByExpandingTildeInPath]];
   [self loadStore]; [self buildWindow]; [self showMain]; UpdateHistory(@"SwiftStudio"); [NSApp activateIgnoringOtherApps:YES];
   __weak StudioDelegate *weakSelf = self;
   self.shortcutMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
@@ -210,7 +348,9 @@ static void UpdateHistory(NSString *appName) {
     self.store = [@{@"activeProject":@"myapp", @"projects":[@{@"myapp":[@{@"name":@"MyApp", @"updatedAt":@([NSDate.date timeIntervalSince1970]-86400), @"activeFile":@"ContentView", @"files":files} mutableCopy], @"other":[@{@"name":@"MyOtherApp", @"updatedAt":@([NSDate.date timeIntervalSince1970]-35*86400), @"activeFile":@"ContentView", @"files":[files mutableCopy]} mutableCopy]} mutableCopy]} mutableCopy];
   }
   self.activeProjectID = self.store[@"activeProject"] ?: @"myapp";
+  self.selectedDesktopID = self.activeProjectID;
 }
+
 - (void)saveStore { NSData *data = [NSJSONSerialization dataWithJSONObject:self.store options:NSJSONWritingPrettyPrinted error:nil]; [data writeToFile:self.docsPath atomically:YES]; }
 - (NSMutableDictionary *)project { return self.store[@"projects"][self.activeProjectID]; }
 - (NSMutableDictionary *)file { return [self project][@"files"][self.activeFileID]; }
@@ -404,6 +544,30 @@ static void UpdateHistory(NSString *appName) {
   BOOL control = (flags & NSEventModifierFlagControl) != 0;
   BOOL shift = (flags & NSEventModifierFlagShift) != 0;
   BOOL option = (flags & NSEventModifierFlagOption) != 0;
+  BOOL deleteKey = event.keyCode == 51;
+  BOOL returnKey = event.keyCode == 36 || event.keyCode == 76 || [key isEqualToString:@"\r"] || [key isEqualToString:@"\n"];
+
+  if (command && !control && !option && shift && [key isEqualToString:@"n"]) {
+    if (self.showingProject || !self.showingChat) [self showTemplatePicker];
+    return YES;
+  }
+  if (command && !control && !option && !shift && [key isEqualToString:@"n"]) {
+    if (self.showingProject) [self newFile:nil]; else if (!self.showingChat) [self newProject:nil];
+    return YES;
+  }
+  if (command && !control && !option && !shift && deleteKey) {
+    if (self.showingProject) [self deleteFile:nil]; else if (!self.showingChat) [self deleteProject:nil];
+    return YES;
+  }
+  if (returnKey && !command && !control && !option) {
+    if (self.window.firstResponder == self.editor || self.window.firstResponder == self.console || self.window.firstResponder == self.chatInput || self.window.firstResponder == self.chatCodeInput) return NO;
+    if (self.showingProject) [self renameFile:nil]; else if (!self.showingChat) [self renameProject:nil];
+    return YES;
+  }
+  if (command && !control && !option && !shift && [key isEqualToString:@"r"] && self.showingProject) {
+    [self sendForPreview:nil];
+    return YES;
+  }
   if (command && !control && !option) {
     SEL action = nil;
     if ([key isEqualToString:@"c"]) action = @selector(copy:);
@@ -449,64 +613,114 @@ static void UpdateHistory(NSString *appName) {
 - (void)showMain {
   self.showingChat = NO; self.showingTemplatePicker = NO; self.showingProject = NO; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects];
   NSRect b = self.root.bounds;
-  CGFloat headerY = MAX(98, b.size.height - 86);
-  NSTextField *title = [self label:@"SwiftStudio" frame:NSMakeRect(0,headerY,b.size.width,72) font:TitleFont(48) color:NSColor.whiteColor];
-  title.alignment = NSTextAlignmentCenter;
-  [self addLine:NSMakeRect(0,headerY-10,b.size.width,2)];
+  SwiftStudioDesktopBackgroundView *desktop = [[SwiftStudioDesktopBackgroundView alloc] initWithFrame:b];
+  desktop.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+  [self.dynamicViews addObject:desktop];
+  [self.root addSubview:desktop];
 
-  CGFloat controlsH = 70;
-  CGFloat listY = controlsH + 14;
-  CGFloat listH = MAX(120, headerY - 36 - listY);
-  NSScrollView *projectScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0,listY,b.size.width,listH)];
-  projectScroll.borderType = NSNoBorder;
-  projectScroll.hasVerticalScroller = YES;
-  projectScroll.drawsBackground = NO;
-  [self tuneScrollView:projectScroll];
-  CGFloat rowW = MAX(360, b.size.width - 20);
-  CGFloat contentH = MAX(listH, self.projectIDs.count * 88 + 12);
-  NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0,0,b.size.width,contentH)];
-  CGFloat y = contentH - 76;
-  for (NSString *pid in self.projectIDs) {
-    NSDictionary *p = self.store[@"projects"][pid];
-    BOOL selected = [pid isEqualToString:self.activeProjectID];
-    NSButton *row = [[NSButton alloc] initWithFrame:NSMakeRect(10,y,rowW,64)];
-    row.title = @"";
-    row.bordered = NO;
-    row.target = self;
-    row.action = @selector(selectProject:);
-    row.identifier = pid;
-    row.wantsLayer = YES;
-    row.layer.backgroundColor = (selected ? Blue() : DarkRow()).CGColor;
-    row.layer.cornerRadius = 16;
-    [content addSubview:row];
-    self.projectRows[pid] = row;
-
-    NSTextField *name = [[NSTextField alloc] initWithFrame:NSMakeRect(28,y+13,MIN(360,rowW-210),42)];
-    name.stringValue = p[@"name"] ?: @"Project";
-    name.font = TitleFont(39);
-    name.textColor = NSColor.whiteColor;
-    name.bezeled = NO; name.drawsBackground = NO; name.editable = NO; name.selectable = NO;
-    [content addSubview:name];
-
-    NSTextField *age = [[NSTextField alloc] initWithFrame:NSMakeRect(MIN(390,rowW-170),y+22,160,26)];
-    age.stringValue = [self relativeAge:p[@"updatedAt"]];
-    age.font = TitleFont(20);
-    age.textColor = NSColor.lightGrayColor;
-    age.bezeled = NO; age.drawsBackground = NO; age.editable = NO; age.selectable = NO;
-    [content addSubview:age];
-    self.ageLabels[pid] = age;
-    y -= 88;
+  CGFloat toolbarH = 58;
+  CGFloat toolbarY = b.size.height - toolbarH;
+  NSView *toolbar = [[NSView alloc] initWithFrame:NSMakeRect(0, toolbarY, b.size.width, toolbarH)];
+  toolbar.wantsLayer = YES;
+  toolbar.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.08 alpha:0.42].CGColor;
+  [self.dynamicViews addObject:toolbar]; [self.root addSubview:toolbar];
+  [self addLine:NSMakeRect(0, toolbarY, b.size.width, 1)];
+  NSTextField *title = [self label:@"SwiftStudio Desktop" frame:NSMakeRect(20,toolbarY+10,360,38) font:TitleFont(29) color:NSColor.whiteColor];
+  title.alignment = NSTextAlignmentLeft;
+  if (self.openFolderID.length) {
+    [self button:@"Desktop" frame:NSMakeRect(MAX(280,b.size.width-594), toolbarY+13,104,32) action:@selector(closeFolder:) blue:YES];
+    [self button:@"New" frame:NSMakeRect(MAX(394,b.size.width-480), toolbarY+13,76,32) action:@selector(newProject:) blue:YES];
+    [self button:@"Move Out" frame:NSMakeRect(MAX(480,b.size.width-394), toolbarY+13,104,32) action:@selector(moveProjectOutOfFolder:) blue:YES];
+    [self button:@"Open" frame:NSMakeRect(MAX(594,b.size.width-280), toolbarY+13,76,32) action:@selector(openSelectedProject:) blue:YES];
+    [self redButton:@"Delete" frame:NSMakeRect(MAX(680,b.size.width-194), toolbarY+13,94,32) action:@selector(deleteProject:)];
+  } else {
+    [self button:@"New" frame:NSMakeRect(MAX(300,b.size.width-498), toolbarY+13,76,32) action:@selector(newProject:) blue:YES];
+    [self button:@"Folder" frame:NSMakeRect(MAX(386,b.size.width-412), toolbarY+13,86,32) action:@selector(newFolder:) blue:YES];
+    [self button:@"Template" frame:NSMakeRect(MAX(482,b.size.width-316), toolbarY+13,112,32) action:@selector(showTemplatePicker) blue:YES];
+    [self button:@"Open" frame:NSMakeRect(MAX(604,b.size.width-194), toolbarY+13,76,32) action:@selector(openSelectedProject:) blue:YES];
+    [self redButton:@"Delete" frame:NSMakeRect(MAX(690,b.size.width-108), toolbarY+13,94,32) action:@selector(deleteProject:)];
   }
-  projectScroll.documentView = content;
-  [self.dynamicViews addObject:projectScroll];
-  [self.root addSubview:projectScroll];
-  if (contentH > listH) [[projectScroll contentView] scrollToPoint:NSMakePoint(0, contentH - listH)];
 
-  [self button:@"+" frame:NSMakeRect(16,18,36,36) action:@selector(newProject:) blue:YES];
-  [self button:@"Open" frame:NSMakeRect(62,18,96,36) action:@selector(openSelectedProject:) blue:YES];
-  [self button:@"Rename" frame:NSMakeRect(168,18,130,36) action:@selector(renameProject:) blue:YES];
-  [self redButton:@"Delete" frame:NSMakeRect(308,18,118,36) action:@selector(deleteProject:)];
-  [self button:@"Add project from template" frame:NSMakeRect(438,18,MIN(330,MAX(250,b.size.width-456)),36) action:@selector(showTemplatePicker) blue:YES];
+  CGFloat iconW = 142;
+  CGFloat iconH = 154;
+  CGFloat gapX = 28;
+  CGFloat gapY = 28;
+  CGFloat startX = 34;
+  CGFloat startY = toolbarY - 32 - iconH;
+  NSInteger cols = MAX(1, floor((b.size.width - startX * 2 + gapX) / (iconW + gapX)));
+  NSInteger index = 0;
+  NSMutableArray<NSValue *> *usedDesktopFrames = [NSMutableArray array];
+  NSMutableDictionary *projectPositions = self.store[@"desktopPositions"];
+  if (![projectPositions isKindOfClass:NSMutableDictionary.class]) { projectPositions = [NSMutableDictionary dictionary]; self.store[@"desktopPositions"] = projectPositions; }
+  NSMutableDictionary *folderPositions = self.store[@"desktopFolderPositions"];
+  if (![folderPositions isKindOfClass:NSMutableDictionary.class]) { folderPositions = [NSMutableDictionary dictionary]; self.store[@"desktopFolderPositions"] = folderPositions; }
+  NSMutableArray *folders = self.store[@"desktopFolders"];
+  if (![folders isKindOfClass:NSMutableArray.class]) { folders = [NSMutableArray array]; self.store[@"desktopFolders"] = folders; }
+  NSMutableDictionary *projectFolders = self.store[@"desktopProjectFolders"];
+  if (![projectFolders isKindOfClass:NSMutableDictionary.class]) { projectFolders = [NSMutableDictionary dictionary]; self.store[@"desktopProjectFolders"] = projectFolders; }
+
+  if (!self.openFolderID.length) for (NSDictionary *folder in folders) {
+    NSString *folderID = folder[@"id"] ?: folder[@"name"];
+    NSString *folderName = folder[@"name"] ?: @"Folder";
+    NSInteger col = index % cols;
+    NSInteger rowIndex = index / cols;
+    CGFloat x = startX + col * (iconW + gapX);
+    CGFloat y = startY - rowIndex * (iconH + gapY);
+    NSDictionary *pos = folderPositions[folderID];
+    if ([pos isKindOfClass:NSDictionary.class]) { x = [pos[@"x"] doubleValue]; y = [pos[@"y"] doubleValue]; }
+    NSRect settledFolderFrame = [self settledDesktopFrameForProposedFrame:NSMakeRect(x,y,iconW,iconH) usedFrames:usedDesktopFrames startX:startX startY:startY gapX:gapX gapY:gapY columns:cols];
+    x = settledFolderFrame.origin.x; y = settledFolderFrame.origin.y;
+    folderPositions[folderID] = @{@"x":@(x), @"y":@(y)};
+    SwiftStudioDesktopIconView *item = [[SwiftStudioDesktopIconView alloc] initWithFrame:settledFolderFrame];
+    item.identifier = [@"folder:" stringByAppendingString:folderID ?: @"Folder"];
+    item.displayName = folderName;
+    item.folder = YES;
+    item.selected = [self.selectedDesktopID isEqualToString:item.identifier];
+    item.target = self;
+    item.action = @selector(selectFolder:);
+    item.doubleAction = @selector(openFolder:);
+    item.dragAction = @selector(desktopItemDidMove:);
+    [self.root addSubview:item];
+    [self.dynamicViews addObject:item];
+    [usedDesktopFrames addObject:[NSValue valueWithRect:item.frame]];
+    index++;
+  }
+
+  NSImage *icon = self.nsspIcon ?: self.swiftLogo;
+  for (NSString *pid in self.projectIDs) {
+    NSString *folderForProject = projectFolders[pid];
+    if (self.openFolderID.length) {
+      if (![folderForProject isEqualToString:self.openFolderID]) continue;
+    } else if (folderForProject.length) continue;
+    NSDictionary *p = self.store[@"projects"][pid];
+    BOOL selected = [self.selectedDesktopID isEqualToString:pid] || (!self.selectedDesktopID.length && [pid isEqualToString:self.activeProjectID]);
+    NSInteger col = index % cols;
+    NSInteger rowIndex = index / cols;
+    CGFloat x = startX + col * (iconW + gapX);
+    CGFloat y = startY - rowIndex * (iconH + gapY);
+    NSDictionary *pos = projectPositions[pid];
+    if ([pos isKindOfClass:NSDictionary.class]) { x = [pos[@"x"] doubleValue]; y = [pos[@"y"] doubleValue]; }
+    if (y < 24) y = 24;
+    NSRect settledProjectFrame = [self settledDesktopFrameForProposedFrame:NSMakeRect(x,y,iconW,iconH) usedFrames:usedDesktopFrames startX:startX startY:startY gapX:gapX gapY:gapY columns:cols];
+    x = settledProjectFrame.origin.x; y = settledProjectFrame.origin.y;
+    projectPositions[pid] = @{@"x":@(x), @"y":@(y)};
+
+    SwiftStudioDesktopIconView *item = [[SwiftStudioDesktopIconView alloc] initWithFrame:settledProjectFrame];
+    item.identifier = pid;
+    item.displayName = [NSString stringWithFormat:@"%@.nssp", p[@"name"] ?: @"Project"];
+    item.icon = icon;
+    item.selected = selected;
+    item.folder = NO;
+    item.target = self;
+    item.action = @selector(selectProject:);
+    item.doubleAction = @selector(openDesktopProject:);
+    item.dragAction = @selector(desktopItemDidMove:);
+    [self.root addSubview:item];
+    [self.dynamicViews addObject:item];
+    self.projectRows[pid] = item;
+    index++;
+  }
+  [self saveStore];
   [self addNoticeCardIfNeeded];
 }
 - (NSArray *)loadChatMessages {
@@ -701,25 +915,185 @@ static void UpdateHistory(NSString *appName) {
   self.incomingShareStatus = nil;
   [self redrawCurrentPage];
 }
-- (void)selectProject:(NSButton *)sender {
-  self.activeProjectID = sender.identifier;
-  self.store[@"activeProject"] = self.activeProjectID;
-  for (NSString *pid in self.projectRows) self.projectRows[pid].layer.backgroundColor = ([pid isEqualToString:self.activeProjectID] ? Blue() : DarkRow()).CGColor;
-  [self saveStore];
+- (BOOL)desktopFrame:(NSRect)frame collidesWithFrames:(NSArray<NSValue *> *)usedFrames {
+  for (NSValue *value in usedFrames) {
+    if (NSIntersectsRect(NSInsetRect(value.rectValue, -8, -8), frame)) return YES;
+  }
+  return NO;
 }
-- (void)openSelectedProject:(id)sender { self.activeFileID = [self project][@"activeFile"] ?: self.fileIDs.firstObject; [self saveStore]; [self showProject]; }
+- (NSRect)settledDesktopFrameForProposedFrame:(NSRect)frame usedFrames:(NSMutableArray<NSValue *> *)usedFrames startX:(CGFloat)startX startY:(CGFloat)startY gapX:(CGFloat)gapX gapY:(CGFloat)gapY columns:(NSInteger)columns {
+  if (![self desktopFrame:frame collidesWithFrames:usedFrames]) return frame;
+  CGFloat w = frame.size.width;
+  CGFloat h = frame.size.height;
+  NSInteger cols = MAX(1, columns);
+  for (NSInteger i = 0; i < 500; i++) {
+    NSInteger col = i % cols;
+    NSInteger row = i / cols;
+    NSRect candidate = NSMakeRect(startX + col * (w + gapX), MAX(24, startY - row * (h + gapY)), w, h);
+    if (![self desktopFrame:candidate collidesWithFrames:usedFrames]) return candidate;
+  }
+  return frame;
+}
+- (NSRect)desktopIconArtworkRectForItem:(SwiftStudioDesktopIconView *)item {
+  NSRect f = item.frame;
+  return NSMakeRect(f.origin.x + (f.size.width - 84) / 2, f.origin.y + f.size.height - 96, 84, 84);
+}
+- (void)selectFolder:(id)sender {
+  NSString *fid = [sender valueForKey:@"identifier"];
+  if (!fid.length || ![fid hasPrefix:@"folder:"]) return;
+  self.selectedDesktopID = fid;
+  [self showMain];
+}
+- (NSString *)folderIDFromDesktopID:(NSString *)desktopID {
+  if (![desktopID hasPrefix:@"folder:"]) return nil;
+  return [desktopID substringFromIndex:[@"folder:" length]];
+}
+- (NSMutableDictionary *)folderRecordForID:(NSString *)folderID {
+  NSMutableArray *folders = self.store[@"desktopFolders"];
+  for (NSMutableDictionary *folder in folders) {
+    if ([folder[@"id"] isEqualToString:folderID]) return folder;
+  }
+  return nil;
+}
+- (void)openFolder:(id)sender {
+  NSString *fid = [self folderIDFromDesktopID:[sender valueForKey:@"identifier"]];
+  if (!fid.length) return;
+  self.openFolderID = fid;
+  self.selectedDesktopID = nil;
+  [self showMain];
+}
+- (void)closeFolder:(id)sender {
+  self.openFolderID = nil;
+  self.selectedDesktopID = self.activeProjectID;
+  [self showMain];
+}
+- (void)moveProjectOutOfFolder:(id)sender {
+  if (!self.selectedDesktopID.length || [self.selectedDesktopID hasPrefix:@"folder:"]) return;
+  NSMutableDictionary *projectFolders = self.store[@"desktopProjectFolders"];
+  if ([projectFolders isKindOfClass:NSMutableDictionary.class]) [projectFolders removeObjectForKey:self.selectedDesktopID];
+  [self saveStore];
+  [self showMain];
+}
+- (void)newFolder:(id)sender {
+  NSMutableArray *folders = self.store[@"desktopFolders"];
+  if (![folders isKindOfClass:NSMutableArray.class]) { folders = [NSMutableArray array]; self.store[@"desktopFolders"] = folders; }
+  NSString *base = @"New Folder";
+  NSString *name = base;
+  NSUInteger suffix = 2;
+  NSMutableSet *names = [NSMutableSet set];
+  for (NSDictionary *folder in folders) if ([folder[@"name"] length]) [names addObject:folder[@"name"]];
+  while ([names containsObject:name]) name = [NSString stringWithFormat:@"%@ %lu", base, (unsigned long)suffix++];
+  NSString *folderID = [NSString stringWithFormat:@"folder-%.0f", NSDate.date.timeIntervalSince1970 * 1000];
+  [folders addObject:[@{@"id":folderID, @"name":name} mutableCopy]];
+  NSMutableDictionary *positions = self.store[@"desktopFolderPositions"];
+  if (![positions isKindOfClass:NSMutableDictionary.class]) { positions = [NSMutableDictionary dictionary]; self.store[@"desktopFolderPositions"] = positions; }
+  positions[folderID] = @{@"x":@34, @"y":@(MAX(24, self.root.bounds.size.height - 244))};
+  [self saveStore];
+  [self showMain];
+}
+- (void)desktopItemDidMove:(SwiftStudioDesktopIconView *)item {
+  if (!item.identifier.length) return;
+  NSString *key = item.identifier;
+  BOOL folder = [key hasPrefix:@"folder:"];
+  if (folder) key = [key substringFromIndex:[@"folder:" length]];
+  if (!folder && !self.openFolderID.length) {
+    for (NSView *view in self.dynamicViews) {
+      if (![view isKindOfClass:SwiftStudioDesktopIconView.class] || view == item) continue;
+      SwiftStudioDesktopIconView *target = (SwiftStudioDesktopIconView *)view;
+      if (!target.folder || ![target.identifier hasPrefix:@"folder:"]) continue;
+      NSPoint droppedCenter = NSMakePoint(NSMidX([self desktopIconArtworkRectForItem:item]), NSMidY([self desktopIconArtworkRectForItem:item]));
+      NSRect targetIconRect = NSInsetRect([self desktopIconArtworkRectForItem:target], -26, -26);
+      if (NSPointInRect(droppedCenter, targetIconRect)) {
+        NSString *folderID = [self folderIDFromDesktopID:target.identifier];
+        if (folderID.length) {
+          NSMutableDictionary *projectFolders = self.store[@"desktopProjectFolders"];
+          if (![projectFolders isKindOfClass:NSMutableDictionary.class]) { projectFolders = [NSMutableDictionary dictionary]; self.store[@"desktopProjectFolders"] = projectFolders; }
+          projectFolders[key] = folderID;
+          NSMutableDictionary *positions = self.store[@"desktopPositions"];
+          if ([positions isKindOfClass:NSMutableDictionary.class]) [positions removeObjectForKey:key];
+          self.selectedDesktopID = nil;
+          item.hidden = YES;
+          [self saveStore];
+          [self showMain];
+          return;
+        }
+      }
+    }
+  }
+  NSString *storeKey = folder ? @"desktopFolderPositions" : @"desktopPositions";
+  NSMutableDictionary *positions = self.store[storeKey];
+  if (![positions isKindOfClass:NSMutableDictionary.class]) { positions = [NSMutableDictionary dictionary]; self.store[storeKey] = positions; }
+  positions[key] = @{@"x":@(item.frame.origin.x), @"y":@(item.frame.origin.y)};
+  [self saveStore];
+  [self showMain];
+}
+- (void)selectProject:(id)sender {
+  NSString *pid = [sender valueForKey:@"identifier"];
+  if (!pid.length || [pid hasPrefix:@"folder:"]) return;
+  self.activeProjectID = pid;
+  self.selectedDesktopID = pid;
+  self.store[@"activeProject"] = self.activeProjectID;
+  [self saveStore];
+  [self showMain];
+}
+- (void)openDesktopProject:(id)sender {
+  NSString *pid = [sender valueForKey:@"identifier"];
+  if (!pid.length || [pid hasPrefix:@"folder:"]) return;
+  self.activeProjectID = pid;
+  self.selectedDesktopID = pid;
+  self.store[@"activeProject"] = self.activeProjectID;
+  [self openSelectedProject:nil];
+}
+- (void)openSelectedProject:(id)sender {
+  if ([self.selectedDesktopID hasPrefix:@"folder:"]) {
+    self.openFolderID = [self folderIDFromDesktopID:self.selectedDesktopID];
+    self.selectedDesktopID = nil;
+    [self showMain];
+    return;
+  }
+  if (self.selectedDesktopID.length && ![self.selectedDesktopID hasPrefix:@"folder:"]) self.activeProjectID = self.selectedDesktopID;
+  self.activeFileID = [self project][@"activeFile"] ?: self.fileIDs.firstObject;
+  [self saveStore];
+  [self showProject];
+}
 - (void)renameProject:(id)sender {
-  NSAlert *alert = [NSAlert new]; alert.messageText = @"Rename project";
+  BOOL folderSelected = [self.selectedDesktopID hasPrefix:@"folder:"];
+  NSMutableDictionary *targetFolder = folderSelected ? [self folderRecordForID:[self folderIDFromDesktopID:self.selectedDesktopID]] : nil;
+  if (!folderSelected && self.selectedDesktopID.length) self.activeProjectID = self.selectedDesktopID;
+  NSAlert *alert = [NSAlert new]; alert.messageText = folderSelected ? @"Rename folder" : @"Rename project";
   NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0,0,260,28)];
-  input.stringValue = [self project][@"name"] ?: @"";
+  input.stringValue = folderSelected ? (targetFolder[@"name"] ?: @"Folder") : ([self project][@"name"] ?: @"");
   alert.accessoryView = input; [alert addButtonWithTitle:@"Rename"]; [alert addButtonWithTitle:@"Cancel"];
   if ([alert runModal] == NSAlertFirstButtonReturn && input.stringValue.length) {
-    [self project][@"name"] = input.stringValue;
-    [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
+    if (folderSelected) targetFolder[@"name"] = input.stringValue;
+    else { [self project][@"name"] = input.stringValue; [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970); }
     [self saveStore]; [self showMain];
   }
 }
 - (void)deleteProject:(id)sender {
+  BOOL folderSelected = [self.selectedDesktopID hasPrefix:@"folder:"];
+  if (folderSelected) {
+    NSString *folderID = [self folderIDFromDesktopID:self.selectedDesktopID];
+    NSMutableDictionary *folder = [self folderRecordForID:folderID];
+    NSString *name = folder[@"name"] ?: @"Folder";
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = [NSString stringWithFormat:@"Attention: Are you sure you want to delete '%@'?", name];
+    [alert addButtonWithTitle:@"Delete"]; [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSMutableArray *folders = self.store[@"desktopFolders"];
+    if ([folders isKindOfClass:NSMutableArray.class]) [folders removeObject:folder];
+    NSMutableDictionary *projectFolders = self.store[@"desktopProjectFolders"];
+    if ([projectFolders isKindOfClass:NSMutableDictionary.class]) {
+      for (NSString *pid in projectFolders.allKeys.copy) if ([projectFolders[pid] isEqualToString:folderID]) [projectFolders removeObjectForKey:pid];
+    }
+    NSMutableDictionary *folderPositions = self.store[@"desktopFolderPositions"];
+    if ([folderPositions isKindOfClass:NSMutableDictionary.class]) [folderPositions removeObjectForKey:folderID];
+    if ([self.openFolderID isEqualToString:folderID]) self.openFolderID = nil;
+    self.selectedDesktopID = self.activeProjectID;
+    [self saveStore]; [self showMain];
+    return;
+  }
+  if (self.selectedDesktopID.length) self.activeProjectID = self.selectedDesktopID;
   NSString *name = [self project][@"name"] ?: @"Project";
   NSAlert *alert = [NSAlert new];
   alert.messageText = [NSString stringWithFormat:@"Attention: Are you sure you want to delete '%@'?", name];
@@ -727,12 +1101,15 @@ static void UpdateHistory(NSString *appName) {
   [alert addButtonWithTitle:@"Cancel"];
   if ([alert runModal] != NSAlertFirstButtonReturn) return;
   [self.store[@"projects"] removeObjectForKey:self.activeProjectID];
+  NSMutableDictionary *projectFolders = self.store[@"desktopProjectFolders"];
+  if ([projectFolders isKindOfClass:NSMutableDictionary.class]) [projectFolders removeObjectForKey:self.activeProjectID];
   NSString *next = self.projectIDs.firstObject;
   if (!next.length) {
     [self newProject:nil];
     return;
   }
   self.activeProjectID = next;
+  self.selectedDesktopID = next;
   self.store[@"activeProject"] = next;
   [self saveStore];
   [self showMain];
@@ -740,7 +1117,13 @@ static void UpdateHistory(NSString *appName) {
 - (void)newProject:(id)sender {
   NSString *pid = [NSString stringWithFormat:@"project-%.0f", NSDate.date.timeIntervalSince1970]; NSString *name = [NSString stringWithFormat:@"MyApp%lu", (unsigned long)self.projectIDs.count + 1];
   self.store[@"projects"][pid] = [@{@"name":name, @"updatedAt":@(NSDate.date.timeIntervalSince1970), @"activeFile":@"ContentView", @"files":[@{@"ContentView":[@{@"name":@"ContentView", @"code":@"import SwiftUI\n\nstruct ContentView: View {\n    var body: some View {\n        Text(\"Hello\")\n    }\n}\n\n#Preview {\n    ContentView()\n}\n"} mutableCopy]} mutableCopy]} mutableCopy];
-  self.activeProjectID = pid; self.store[@"activeProject"] = pid; [self saveStore]; [self showMain];
+  self.activeProjectID = pid; self.selectedDesktopID = pid; self.store[@"activeProject"] = pid;
+  if (self.openFolderID.length) {
+    NSMutableDictionary *projectFolders = self.store[@"desktopProjectFolders"];
+    if (![projectFolders isKindOfClass:NSMutableDictionary.class]) { projectFolders = [NSMutableDictionary dictionary]; self.store[@"desktopProjectFolders"] = projectFolders; }
+    projectFolders[pid] = self.openFolderID;
+  }
+  [self saveStore]; [self showMain];
 }
 - (void)showTemplatePicker {
   self.showingChat = NO; self.showingProject = NO; self.showingTemplatePicker = YES; [self clearDynamic]; [self.ageLabels removeAllObjects]; [self.projectRows removeAllObjects];
@@ -840,7 +1223,12 @@ static void UpdateHistory(NSString *appName) {
   }
   CGFloat editorH = MAX(220, contentTop - editorY);
   CGFloat bottomButtonY = self.fishyPanelMode ? consoleH + 18 : 18;
-  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES]; [self label:p[@"name"] frame:NSMakeRect(64,headerY+6,210,58) font:TitleFont(42) color:NSColor.whiteColor]; [self button:@"Send" frame:NSMakeRect(245,headerY+16,145,44) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(402,headerY+16,130,44) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(544,headerY+16,100,44) action:@selector(stopPreview:)]; [self button:@"Rename" frame:NSMakeRect(656,headerY+16,120,44) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"Rename File" frame:NSMakeRect(788,headerY+16,150,44) action:@selector(renameFile:) blue:YES]; [self addLine:NSMakeRect(0,headerY,b.size.width,2)]; [self addLine:NSMakeRect(leftW,self.fishyPanelMode ? consoleH : 0,2,headerY - (self.fishyPanelMode ? consoleH : 0))];
+  NSView *toolbar = [[NSView alloc] initWithFrame:NSMakeRect(0,headerY,b.size.width,b.size.height-headerY)]; toolbar.wantsLayer = YES; toolbar.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.075 alpha:1.0].CGColor; [self.dynamicViews addObject:toolbar]; [self.root addSubview:toolbar];
+  [self button:@"<" frame:NSMakeRect(18,headerY+26,32,32) action:@selector(back:) blue:YES];
+  [self label:p[@"name"] frame:NSMakeRect(64,headerY+13,260,44) font:TitleFont(31) color:NSColor.whiteColor];
+  [self button:@"Send" frame:NSMakeRect(330,headerY+20,96,34) action:@selector(sendForPreview:) blue:YES]; [self button:@"Share" frame:NSMakeRect(436,headerY+20,96,34) action:@selector(shareProject:) blue:YES]; [self redButton:@"Stop" frame:NSMakeRect(542,headerY+20,80,34) action:@selector(stopPreview:)]; [self button:@"Project" frame:NSMakeRect(632,headerY+20,94,34) action:@selector(renameProjectInEditor:) blue:YES]; [self button:@"File" frame:NSMakeRect(736,headerY+20,74,34) action:@selector(renameFile:) blue:YES];
+  [self addLine:NSMakeRect(0,headerY,b.size.width,1)]; [self addLine:NSMakeRect(leftW,self.fishyPanelMode ? consoleH : 0,1,headerY - (self.fishyPanelMode ? consoleH : 0))];
+  NSView *finderSidebar = [[NSView alloc] initWithFrame:NSMakeRect(0,self.fishyPanelMode ? consoleH : 0,leftW,headerY - (self.fishyPanelMode ? consoleH : 0))]; finderSidebar.wantsLayer = YES; finderSidebar.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.105 alpha:1.0].CGColor; [self.dynamicViews addObject:finderSidebar]; [self.root addSubview:finderSidebar positioned:NSWindowBelow relativeTo:nil];
   if (previewVisible) {
     CGFloat dividerX = self.previewPaneFrame.origin.x - 9 - sideBarW;
     if (self.previewPaneWide) {
@@ -881,7 +1269,7 @@ static void UpdateHistory(NSString *appName) {
   for (NSString *fid in self.fileIDs) {
     NSDictionary *f = [self project][@"files"][fid];
     BOOL selectedFile = [fid isEqualToString:self.activeFileID];
-    NSButton *hit = [[NSButton alloc] initWithFrame:NSMakeRect(0,fileY-4,leftW-4,34)];
+    NSButton *hit = [[NSButton alloc] initWithFrame:NSMakeRect(8,fileY-4,leftW-16,34)];
     hit.title = @"";
     hit.bordered = NO;
     hit.target = self;
@@ -889,11 +1277,11 @@ static void UpdateHistory(NSString *appName) {
     hit.identifier = fid;
     hit.wantsLayer = YES;
     hit.layer.backgroundColor = (selectedFile ? Blue() : NSColor.clearColor).CGColor;
-    hit.layer.opacity = selectedFile ? 0.35 : 0.01;
+    hit.layer.opacity = selectedFile ? 0.62 : 0.01;
     hit.layer.cornerRadius = 12;
     [fileContent addSubview:hit];
     if (self.swiftLogo) {
-      NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(10,fileY-1,32,28)];
+      NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(15,fileY+1,26,24)];
       iv.image = self.swiftLogo;
       [fileContent addSubview:iv];
     }
@@ -903,6 +1291,17 @@ static void UpdateHistory(NSString *appName) {
     fileName.textColor = NSColor.whiteColor;
     fileName.bezeled = NO; fileName.drawsBackground = NO; fileName.editable = NO; fileName.selectable = NO;
     [fileContent addSubview:fileName];
+
+    NSButton *fileHit = [[NSButton alloc] initWithFrame:NSMakeRect(0,fileY-6,leftW,38)];
+    fileHit.title = @"";
+    fileHit.bordered = NO;
+    fileHit.target = self;
+    fileHit.action = @selector(selectFile:);
+    fileHit.identifier = fid;
+    fileHit.wantsLayer = YES;
+    fileHit.layer.backgroundColor = NSColor.clearColor.CGColor;
+    fileHit.layer.opacity = 0.01;
+    [fileContent addSubview:fileHit positioned:NSWindowAbove relativeTo:nil];
     fileY -= 38;
   }
   fileScroll.documentView = fileContent;
@@ -2027,6 +2426,24 @@ static void UpdateHistory(NSString *appName) {
   [self project][@"activeFile"] = newID;
   [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
   [self saveStore]; [self showProject];
+}
+- (void)deleteFile:(id)sender {
+  [self saveEditor];
+  if (!self.activeFileID.length) return;
+  NSMutableDictionary *files = [self project][@"files"];
+  if (files.count <= 1) return;
+  NSString *name = [self file][@"name"] ?: self.activeFileID;
+  NSAlert *alert = [NSAlert new];
+  alert.messageText = [NSString stringWithFormat:@"Attention: Are you sure you want to delete '%@'?", name];
+  [alert addButtonWithTitle:@"Delete"];
+  [alert addButtonWithTitle:@"Cancel"];
+  if ([alert runModal] != NSAlertFirstButtonReturn) return;
+  [files removeObjectForKey:self.activeFileID];
+  self.activeFileID = self.fileIDs.firstObject;
+  [self project][@"activeFile"] = self.activeFileID;
+  [self project][@"updatedAt"] = @(NSDate.date.timeIntervalSince1970);
+  [self saveStore];
+  [self showProject];
 }
 - (NSString *)combinedSource {
   NSMutableString *source = [NSMutableString string]; for (NSString *fid in self.fileIDs) { [source appendFormat:@"\n// %@.swift\n%@\n", fid, [self project][@"files"][fid][@"code"] ?: @""]; } return source;
